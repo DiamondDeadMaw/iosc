@@ -1,0 +1,7 @@
+name = "MacroProbe"
+bundle_id = "com.example.macroprobe"
+version = "1.0.0"
+build = "1"
+deployment_target = "18.0"
+sources = ["Sources/**/*.swift"]
+frameworks = ["Foundation", "SwiftUI", "SwiftData"]

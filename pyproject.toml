@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "iosc"
+version = "0.1.0"
+requires-python = ">=3.11"
+# Pair record generation needs RSA keygen and X.509, not worth hand rolling
+dependencies = ["cryptography>=42"]
+
+[project.scripts]
+iosc = "iosc.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+# pytest skips a directory called build by default, which would hide tests/build
+norecursedirs = ["*.egg", ".*", "_darcs", "CVS", "dist", "node_modules", "venv"]
+markers = [
+    "external",
+    "device",
+]
