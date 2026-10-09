@@ -20,6 +20,24 @@ LC_SEGMENT_64 = 0x19
 LC_SYMTAB = 0x2
 LC_CODE_SIGNATURE = 0x1D
 LC_UUID = 0x1B
+LC_LOAD_DYLIB = 0xC
+LC_LOAD_WEAK_DYLIB = 0x80000018
+LC_REEXPORT_DYLIB = 0x8000001F
+LC_LAZY_LOAD_DYLIB = 0x20
+LC_LOAD_UPWARD_DYLIB = 0x80000023
+DYLIB_LOAD_COMMANDS = (
+    LC_LOAD_DYLIB,
+    LC_LOAD_WEAK_DYLIB,
+    LC_REEXPORT_DYLIB,
+    LC_LAZY_LOAD_DYLIB,
+    LC_LOAD_UPWARD_DYLIB,
+)
+
+CPU_SUBTYPE_MASK = 0x00FFFFFF
+CPU_SUBTYPE_ARM64_ALL = 0
+FAT_ARCH_SIZE = 20
+FAT_ARCH_64_SIZE = 32
+FAT_MAGIC_64 = 0xCAFEBABF
 
 HEADER_SIZE = 32
 SEGMENT_NAME_SIZE = 16
@@ -106,6 +124,48 @@ def nearest_symbol(parsed: dict[str, Any], vmaddr: int) -> tuple[str, int] | Non
         return None
     symbol = symbols[index]
     return symbol["name"], vmaddr - symbol["address"]
+
+
+# loaded install names, load command order
+def dylib_loads(data: bytes) -> list[str]:
+    header = read_header(data)
+    names: list[str] = []
+    offset = HEADER_SIZE
+    for _ in range(header.ncmds):
+        cmd, cmdsize = struct.unpack_from("<II", data, offset)
+        if cmdsize < 8:
+            raise MachOError(f"load command at {offset} has cmdsize {cmdsize}")
+        if cmd in DYLIB_LOAD_COMMANDS:
+            name_offset = struct.unpack_from("<I", data, offset + 8)[0]
+            raw = data[offset + name_offset : offset + cmdsize]
+            names.append(raw.split(b"\x00", 1)[0].decode("utf-8", "replace"))
+        offset += cmdsize
+    return names
+
+
+# plain arm64 slice, arm64e is skipped like xcode
+def thin_arm64(data: bytes) -> bytes:
+    if data[:4] == b"\xbe\xba\xfe\xca":
+        raise MachOError("byte swapped fat headers are not supported")
+    if data[:4] not in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+        header = read_header(data)
+        if not header.is_arm64:
+            raise MachOError(f"expected arm64 ({CPU_TYPE_ARM64:#x}), got {header.cputype:#x}")
+        return data
+    magic, count = struct.unpack_from(">II", data, 0)
+    wide = magic == FAT_MAGIC_64
+    stride = FAT_ARCH_64_SIZE if wide else FAT_ARCH_SIZE
+    for index in range(count):
+        entry = 8 + index * stride
+        if wide:
+            cputype, cpusubtype, offset, size = struct.unpack_from(">iiQQ", data, entry)
+        else:
+            cputype, cpusubtype, offset, size = struct.unpack_from(">iiII", data, entry)
+        if cputype == CPU_TYPE_ARM64 and cpusubtype & CPU_SUBTYPE_MASK == CPU_SUBTYPE_ARM64_ALL:
+            if offset + size > len(data):
+                raise MachOError(f"fat slice {index} runs past the end of the file")
+            return data[offset : offset + size]
+    raise MachOError("universal file has no arm64 slice")
 
 
 # one walk of the load commands

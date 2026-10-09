@@ -17,6 +17,7 @@ class LinkSpec:
     # swift emits calls to builtins like ___isPlatformVersionAtLeast
     # nothing in the sdk defines them
     clang_rt: Path | None = None
+    rpaths: list[str] = field(default_factory=list)
     extra_flags: list[str] = field(default_factory=list)
 
 
@@ -42,6 +43,8 @@ def build_link_argv(toolchain: Toolchain, spec: LinkSpec) -> list[str]:
         argv.extend(["-framework", fw])
     if spec.clang_rt is not None:
         argv.append(str(spec.clang_rt))
+    for rpath in spec.rpaths:
+        argv.extend(["-rpath", rpath])
     for flag in spec.extra_flags:
         argv.append(flag)
     argv.extend(["-o", str(spec.output)])

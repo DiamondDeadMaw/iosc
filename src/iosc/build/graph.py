@@ -82,12 +82,16 @@ class Stage:
     # these files come from an earlier stage and arent known at plan time
     # named here, resolved just before this stage is judged
     resolve_inputs: Callable[[], Sequence[Path]] | None = None
+    # outputs known only after the stage runs
+    resolve_outputs: Callable[[], Sequence[Path]] | None = None
 
 
 def _resolved(stage: Stage) -> Stage:
-    if stage.resolve_inputs is None:
-        return stage
-    return replace(stage, inputs=tuple(stage.resolve_inputs()))
+    if stage.resolve_inputs is not None:
+        stage = replace(stage, inputs=tuple(stage.resolve_inputs()))
+    if stage.resolve_outputs is not None:
+        stage = replace(stage, outputs=tuple(stage.resolve_outputs()))
+    return stage
 
 
 @dataclass(frozen=True)
@@ -322,7 +326,7 @@ def execute(
         # drop before the run. an interrupted stage isnt trusted on restart
         cache.drop(stage.name)
         stage.run()
-        cache.record(stage)
+        cache.record(_resolved(stage))
         ran.add(stage.name)
         outcomes.append(StageOutcome(stage.name, True, reason))
 

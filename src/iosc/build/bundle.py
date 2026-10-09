@@ -6,6 +6,7 @@ import shutil
 from typing import Any
 
 from iosc.build.graph import BuildLayout, Stage, fingerprint, relative_key
+from iosc.build.swift_libraries import embed_swift_libraries
 from iosc.config.manifest import Manifest
 from iosc.core import BundleError, rmtree_force
 from iosc.core.errors import MachOError
@@ -157,6 +158,8 @@ def assemble(
     layout: BuildLayout,
     executable: Path,
     product: str,
+    nested: Sequence[Path] = (),
+    swift_library_dirs: Sequence[Path] = (),
 ) -> Path:
     read_macho_arch(executable)
     info = build_info_plist(
@@ -170,6 +173,7 @@ def assemble(
     destination = staging_app / product
     shutil.copyfile(executable, destination)
     os.chmod(destination, 0o755)
+    embed_swift_libraries(destination, staging_app, swift_library_dirs)
 
     (staging_app / "Info.plist").write_bytes(write_plist(info, binary=True))
     (staging_app / "PkgInfo").write_bytes(PKG_INFO)
@@ -179,6 +183,12 @@ def assemble(
         target = staging_app / resource.relative_to(layout.project)
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(resource, target)
+
+    # package resource bundles sit in the app root, where Bundle.module looks
+    for directory in nested:
+        if not directory.is_dir():
+            raise BundleError(f"resource bundle {directory} was not built")
+        _copy_tree_into(directory, staging_app / directory.name)
 
     # swap in only after the whole tree is assembled
     rmtree_force(layout.app)
@@ -229,20 +239,24 @@ def bundle_stage(
     executable: Path,
     product: str,
     depends_on: Sequence[str] = (),
+    nested: Sequence[Path] = (),
+    swift_library_dirs: Sequence[Path] = (),
 ) -> Stage:
     resources = collect_resources(manifest, layout.project)
 
-    # layout.resources files arrive via a dependency, not as declared inputs
-    # they may not exist yet when this stage is planned
+    # nested bundles come from dependencies, not declared inputs
+    # may not exist yet at plan time
     print_ = fingerprint(
         {
             "info_plist": build_info_plist(manifest, product),
             "resources": [relative_key(p, layout.project) for p in resources],
+            "nested": [relative_key(p, layout.project) for p in nested],
+            "swift_library_dirs": [str(p) for p in swift_library_dirs],
         }
     )
 
     def run() -> None:
-        assemble(manifest, layout, executable, product)
+        assemble(manifest, layout, executable, product, nested, swift_library_dirs)
 
     return Stage(
         name=STAGE_NAME,
