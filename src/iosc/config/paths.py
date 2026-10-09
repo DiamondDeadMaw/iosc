@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import sys
 
 from iosc.core import MissingExternalAsset
@@ -61,6 +62,10 @@ def state_dir() -> Path:
 
 def cache_dir() -> Path:
     return state_dir() / "cache"
+
+
+def msvc_environment_cache() -> Path:
+    return cache_dir() / "msvc-environment.json"
 
 
 def xcode_xip_dir() -> ExternalAsset:
@@ -215,6 +220,22 @@ def clang_rt_ios() -> Path | None:
         return None
     candidates = sorted(clang_root.glob("*/lib/darwin/libclang_rt.ios.a"))
     return candidates[-1] if candidates else None
+
+
+# swift libs copied into apps deployed below their os
+# newest swift first, first match wins
+def swift_backdeploy_dirs() -> list[Path]:
+    lib_root = (
+        external_root() / "xcode" / "Toolchains" / "XcodeDefault.xctoolchain" / "usr" / "lib"
+    )
+    if not lib_root.is_dir():
+        return []
+    found = [p for p in lib_root.glob("swift-*/iphoneos") if p.is_dir()]
+    return sorted(found, key=lambda p: _version_key(p.parent.name), reverse=True)
+
+
+def _version_key(name: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", name))
 
 
 # the seven macro plugins are built from product/macros

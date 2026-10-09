@@ -1,5 +1,7 @@
 from iosc.config.manifest import (
+    Dependency,
     Manifest,
+    Requirement,
     default_manifest,
     load as load_manifest,
     resolve_sources,
@@ -31,8 +33,10 @@ from iosc.config.settings import (
 )
 
 __all__ = [
+    "Dependency",
     "ExternalAsset",
     "Manifest",
+    "Requirement",
     "Settings",
     "adi_bridge",
     "adi_lib_dir",

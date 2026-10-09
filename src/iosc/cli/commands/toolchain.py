@@ -6,7 +6,7 @@ from iosc.core import logging
 from iosc.core.color import BOLD, CYAN, DIM, GREEN, RED, YELLOW, paint
 from iosc.core.errors import IoscError, MissingExternalAsset
 from iosc.device import list_devices
-from iosc.toolchain import discovery, fetch
+from iosc.toolchain import discovery, fetch, msvc
 
 
 def run_fetch(args) -> None:
@@ -76,6 +76,8 @@ def run_status(args) -> None:
         _probe("anisette (free apple id)", _describe_anisette),
         _probe("dsymutil (file:line in crashes)", lambda: paths.require(paths.dsymutil_tool())),
         _probe("llvm-symbolizer (file:line in crashes)", lambda: paths.require(paths.llvm_symbolizer_tool())),
+        _probe("msvc build tools (swift packages)", msvc.find_vcvarsall),
+        _probe("git (swift packages from a url)", discovery.find_git),
     ]
 
     external = str(paths.external_root())

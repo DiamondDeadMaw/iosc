@@ -54,6 +54,10 @@ class BundleError(IoscError):
     pass
 
 
+class PackageError(IoscError):
+    pass
+
+
 class SigningError(IoscError):
     pass
 

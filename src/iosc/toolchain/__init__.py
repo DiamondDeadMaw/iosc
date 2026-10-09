@@ -1,6 +1,7 @@
 from iosc.toolchain.discovery import (
     Toolchain,
     detect,
+    find_git,
     find_linker,
     find_swiftc,
 )
@@ -17,6 +18,7 @@ from iosc.toolchain.linker import (
     build_link_argv,
     link,
 )
+from iosc.toolchain import git, msvc, swiftpm
 from iosc.toolchain.objdump import (
     MachOSummary,
     assert_linked_ok,
@@ -45,9 +47,13 @@ __all__ = [
     "compile_objects",
     "detect",
     "fetch_tools",
+    "find_git",
     "find_linker",
     "find_swiftc",
+    "git",
     "inspect",
     "link",
+    "msvc",
     "parse_macho_headers",
+    "swiftpm",
 ]

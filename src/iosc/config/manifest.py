@@ -6,6 +6,8 @@ from typing import Any
 
 from iosc.core import ManifestError
 
+MANIFEST_NAME = "iosc.toml"
+
 RE_BUNDLE_ID = re.compile(r"^[a-zA-Z0-9-]+(\.[a-zA-Z0-9-]+)+$")
 RE_DEPLOYMENT_TARGET = re.compile(r"^\d+(\.\d+)*$")
 RE_VERSION = re.compile(r"^\d+(\.\d+)*$")
@@ -23,7 +25,32 @@ KNOWN_MANIFEST_KEYS = {
     "info_plist",
     "swift_flags",
     "linker_flags",
+    "dependencies",
 }
+
+SEMVER = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?"
+RE_SEMVER = re.compile(rf"^{SEMVER}$")
+RE_RANGE = re.compile(rf"^({SEMVER})(\.\.<|\.\.\.)({SEMVER})$")
+RE_REVISION = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+REQUIREMENT_KINDS = ("from", "exact", "range", "branch", "revision")
+DEPENDENCY_KEYS = {"path", "url", "products", *REQUIREMENT_KINDS}
+
+
+@dataclass(frozen=True)
+class Requirement:
+    kind: str
+    value: str
+
+
+@dataclass(frozen=True)
+class Dependency:
+    name: str
+    path: str | None = None
+    url: str | None = None
+    requirement: Requirement | None = None
+    # empty selects the product named after the package
+    products: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -40,10 +67,99 @@ class Manifest:
     info_plist: dict[str, Any] = field(default_factory=dict)
     swift_flags: list[str] = field(default_factory=list)
     linker_flags: list[str] = field(default_factory=list)
+    dependencies: tuple[Dependency, ...] = ()
+
+
+def _semver_key(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.split(r"[-+]", text)[0].split("."))
+
+
+def _check_range(name: str, value: str) -> None:
+    match = RE_RANGE.match(value)
+    if not match:
+        raise ManifestError(
+            f"dependency '{name}' range '{value}' must look like \"1.2.0..<2.0.0\" or \"1.2.0...1.4.0\""
+        )
+    lower, operator, upper = (_semver_key(match[1]), match[2], _semver_key(match[3]))
+    if lower > upper or (operator == "..<" and lower == upper):
+        raise ManifestError(f"dependency '{name}' range '{value}' contains no versions")
+
+
+def parse_requirement(name: str, spec: dict[str, Any]) -> Requirement:
+    given = [kind for kind in REQUIREMENT_KINDS if kind in spec]
+    if len(given) != 1:
+        raise ManifestError(
+            f"dependency '{name}' needs exactly one of {', '.join(REQUIREMENT_KINDS)}"
+        )
+    kind = given[0]
+    value = spec[kind]
+    if not isinstance(value, str) or not value.strip():
+        raise ManifestError(f"dependency '{name}' '{kind}' must be a string")
+    if kind in ("from", "exact") and not RE_SEMVER.match(value):
+        raise ManifestError(f"dependency '{name}' {kind} '{value}' is not a version like 1.2.3")
+    if kind == "range":
+        _check_range(name, value)
+    if kind == "revision" and not RE_REVISION.match(value):
+        raise ManifestError(f"dependency '{name}' revision '{value}' is not a commit hash")
+    return Requirement(kind=kind, value=value)
+
+
+def parse_dependencies(raw: Any) -> tuple[Dependency, ...]:
+    if not isinstance(raw, dict):
+        raise ManifestError("'dependencies' must be a table of name = { url = \"...\", from = \"...\" }")
+
+    dependencies = []
+    for name, spec in raw.items():
+        if not isinstance(spec, dict):
+            raise ManifestError(
+                f"dependency '{name}' must be a table like {{ path = \"../{name}\" }}"
+            )
+        if "id" in spec:
+            raise ManifestError(f"dependency '{name}' uses a registry id, which iosc does not support yet")
+        unknown = sorted(spec.keys() - DEPENDENCY_KEYS)
+        if unknown:
+            raise ManifestError(f"dependency '{name}' has unknown key '{unknown[0]}'")
+
+        products = spec.get("products", [])
+        if not isinstance(products, list) or not all(
+            isinstance(p, str) and p.strip() for p in products
+        ):
+            raise ManifestError(f"dependency '{name}' 'products' must be a list of product names")
+
+        path, url = spec.get("path"), spec.get("url")
+        if (path is None) == (url is None):
+            raise ManifestError(f"dependency '{name}' needs either a 'path' or a 'url'")
+
+        if path is not None:
+            if not isinstance(path, str) or not path.strip():
+                raise ManifestError(f"dependency '{name}' 'path' must be a string")
+            versioned = [kind for kind in REQUIREMENT_KINDS if kind in spec]
+            if versioned:
+                raise ManifestError(
+                    f"dependency '{name}' is a path dependency and takes no '{versioned[0]}'"
+                )
+            dependencies.append(Dependency(name=name, path=path, products=tuple(products)))
+            continue
+
+        if not isinstance(url, str) or not url.strip():
+            raise ManifestError(f"dependency '{name}' 'url' must be a string")
+        dependencies.append(
+            Dependency(
+                name=name,
+                url=url,
+                requirement=parse_requirement(name, spec),
+                products=tuple(products),
+            )
+        )
+    return tuple(dependencies)
+
+
+def path_for(project_dir: Path | str) -> Path:
+    return Path(project_dir) / MANIFEST_NAME
 
 
 def load(project_dir: Path) -> Manifest:
-    manifest_path = Path(project_dir) / "iosc.toml"
+    manifest_path = path_for(project_dir)
     if not manifest_path.exists():
         raise ManifestError(f"manifest not found at {manifest_path}")
 
@@ -124,6 +240,8 @@ def load(project_dir: Path) -> Manifest:
     if not isinstance(linker_flags, list) or not all(isinstance(f, str) for f in linker_flags):
         raise ManifestError("'linker_flags' must be a list of flag strings")
 
+    dependencies = parse_dependencies(data.get("dependencies", {}))
+
     return Manifest(
         name=name,
         bundle_id=bundle_id,
@@ -137,6 +255,7 @@ def load(project_dir: Path) -> Manifest:
         info_plist=info_plist,
         swift_flags=swift_flags,
         linker_flags=linker_flags,
+        dependencies=dependencies,
     )
 
 
@@ -162,8 +281,81 @@ def default_manifest(name: str, bundle_id: str) -> str:
         f"# Signing entitlements\n"
         f"[entitlements]\n\n"
         f"# Extra property list entries\n"
-        f"[info_plist]\n"
+        f"[info_plist]\n\n"
+        f"# Swift packages, e.g. Collections = {{ url = \"https://github.com/apple/swift-collections\", from = \"1.1.0\" }}\n"
+        f"[dependencies]\n"
     )
+
+
+RE_BARE_KEY = re.compile(r"^[A-Za-z0-9_-]+$")
+RE_DEPENDENCIES_HEADER = re.compile(r"^\s*\[\s*dependencies\s*\]\s*(#.*)?$")
+RE_TABLE_HEADER = re.compile(r"^\s*\[")
+
+
+def toml_string(text: str) -> str:
+    escaped = text.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def toml_key(name: str) -> str:
+    return name if RE_BARE_KEY.match(name) else toml_string(name)
+
+
+def dependency_line(dependency: Dependency) -> str:
+    fields: list[str] = []
+    if dependency.path is not None:
+        fields.append(f"path = {toml_string(dependency.path)}")
+    if dependency.url is not None:
+        fields.append(f"url = {toml_string(dependency.url)}")
+    if dependency.requirement is not None:
+        fields.append(f"{dependency.requirement.kind} = {toml_string(dependency.requirement.value)}")
+    if dependency.products:
+        listed = ", ".join(toml_string(p) for p in dependency.products)
+        fields.append(f"products = [{listed}]")
+    return f"{toml_key(dependency.name)} = {{ {', '.join(fields)} }}"
+
+
+# line edit keeps user comments and layout
+def add_dependency(text: str, dependency: Dependency) -> str:
+    try:
+        before = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as err:
+        raise ManifestError(f"iosc.toml has a syntax error, fix it before adding a package ({err})")
+    existing = before.get("dependencies", {})
+    if isinstance(existing, dict) and dependency.name in existing:
+        raise ManifestError(f"dependency '{dependency.name}' is already in iosc.toml")
+
+    line = dependency_line(dependency)
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    header = next((i for i, l in enumerate(lines) if RE_DEPENDENCIES_HEADER.match(l)), None)
+    if header is None:
+        if "dependencies" in before:
+            raise ManifestError(
+                "iosc.toml declares dependencies without a [dependencies] table, add the package by hand"
+            )
+        body = lines + ([""] if lines and lines[-1].strip() else []) + ["[dependencies]", line]
+    else:
+        end = next(
+            (i for i in range(header + 1, len(lines)) if RE_TABLE_HEADER.match(lines[i])),
+            len(lines),
+        )
+        last_entry = header
+        for i in range(header + 1, end):
+            stripped = lines[i].strip()
+            if stripped and not stripped.startswith("#"):
+                last_entry = i
+        body = lines[: last_entry + 1] + [line] + lines[last_entry + 1 :]
+    edited = newline.join(body) + newline
+
+    try:
+        after = tomllib.loads(edited)
+    except tomllib.TOMLDecodeError as err:
+        raise ManifestError(f"adding '{dependency.name}' would break iosc.toml ({err}), add it by hand")
+    parse_dependencies(after.get("dependencies", {}))
+    if dependency.name not in after.get("dependencies", {}):
+        raise ManifestError(f"could not place '{dependency.name}' in iosc.toml, add it by hand")
+    return edited
 
 
 def resolve_sources(manifest: Manifest, project_dir: Path) -> list[Path]:

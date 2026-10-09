@@ -1,9 +1,10 @@
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 
-from iosc.build import assets, bundle, dsym, package
+from iosc.build import assets, bundle, dsym, package, packages
 from iosc.build import compile as build_compile
 from iosc.build import link as build_link
 from iosc.build import interfaces
@@ -22,12 +23,19 @@ from iosc.codesign.identity import identity_from_bytes
 from iosc.codesign.signer import sign_app_recursive
 from iosc.config import manifest as manifest_module
 from iosc.config import paths
-from iosc.config.manifest import Manifest
+from iosc.config.manifest import Dependency, Manifest, Requirement
 from iosc.config.settings import Settings
-from iosc.core import BuildError, BundleError, get_reporter, rmtree_force, write_atomic
+from iosc.core import (
+    BuildError,
+    BundleError,
+    PackageError,
+    get_reporter,
+    rmtree_force,
+    write_atomic,
+)
 from iosc.formats.mobileprovision import Profile
 from iosc.formats.pki import SigningIdentity
-from iosc.toolchain import discovery
+from iosc.toolchain import discovery, git
 from iosc.toolchain.discovery import Toolchain
 
 SIGN_STAGE = "sign"
@@ -87,9 +95,15 @@ def plan_build(project: Project, toolchain: Toolchain, sdk_root: Path) -> list[S
     manifest, layout, product = project.manifest, project.layout, project.product
     partial = bundle.partial_plist_path(layout)
     executable = build_link.executable_path(layout, product)
+    graph = packages.load_graph(manifest, layout, toolchain)
     return [
-        build_compile.compile_stage(manifest, layout, toolchain, sdk_root, product),
-        build_link.link_stage(manifest, layout, toolchain, sdk_root, product),
+        *packages.package_stages(
+            graph, layout, toolchain, sdk_root, manifest.deployment_target
+        ),
+        build_compile.compile_stage(
+            manifest, layout, toolchain, sdk_root, product, graph
+        ),
+        build_link.link_stage(manifest, layout, toolchain, sdk_root, product, graph),
         dsym.dsym_stage(
             layout, executable, product, depends_on=(build_link.STAGE_NAME,)
         ),
@@ -106,7 +120,10 @@ def plan_build(project: Project, toolchain: Toolchain, sdk_root: Path) -> list[S
                 assets.STAGE_NAME,
                 localization.STAGE_NAME,
                 interfaces.STAGE_NAME,
+                *packages.resource_stage_names(graph),
             ),
+            nested=packages.resource_bundles(graph, layout),
+            swift_library_dirs=paths.swift_backdeploy_dirs(),
         ),
     ]
 
@@ -298,6 +315,109 @@ def package_ipa(project_dir: Path | str) -> Path:
     if not project.layout.app.is_dir():
         raise BuildError(f"no bundle at {project.layout.app}, run 'iosc build' first")
     return package.write_ipa(project.layout.app, project.layout.ipa)
+
+
+@dataclass(frozen=True)
+class DependencyReport:
+    dependencies: tuple[packages.DependencyStatus, ...]
+    # pinned packages pulled in by other packages
+    indirect: dict[str, str]
+    targets: tuple[packages.PackageTarget, ...]
+
+
+def _dependency_report(project: Project, graph: packages.PackageGraph) -> DependencyReport:
+    statuses = packages.dependency_statuses(project.manifest, project.layout)
+    direct = {s.identity for s in statuses}
+    pins = packages.pinned_versions(project.layout)
+    return DependencyReport(
+        dependencies=tuple(statuses),
+        indirect={k: v for k, v in sorted(pins.items()) if k not in direct},
+        targets=graph.targets,
+    )
+
+
+def show_dependencies(project_dir: Path | str, settings: Settings | None = None) -> DependencyReport:
+    project = open_project(project_dir)
+    graph = packages.load_graph(project.manifest, project.layout, discovery.detect(settings))
+    return _dependency_report(project, graph)
+
+
+def resolve_dependencies(project_dir: Path | str, settings: Settings | None = None) -> DependencyReport:
+    project = open_project(project_dir)
+    graph = packages.load_graph(
+        project.manifest, project.layout, discovery.detect(settings), refresh=True
+    )
+    return _dependency_report(project, graph)
+
+
+def update_dependencies(
+    project_dir: Path | str, names: Sequence[str] = (), settings: Settings | None = None
+) -> DependencyReport:
+    project = open_project(project_dir)
+    graph = packages.load_graph(
+        project.manifest, project.layout, discovery.detect(settings), update=list(names)
+    )
+    return _dependency_report(project, graph)
+
+
+RE_GIT_SOURCE = re.compile(r"^[\w.+-]+://|^[\w.-]+@[\w.-]+:")
+
+
+def dependency_from_source(
+    project_dir: Path | str,
+    source: str,
+    name: str | None = None,
+    requirement: Requirement | None = None,
+    products: Sequence[str] = (),
+) -> Dependency:
+    if RE_GIT_SOURCE.match(source):
+        key = name or re.sub(r"\.git$", "", re.split(r"[/:]", source.rstrip("/"))[-1])
+        if requirement is None:
+            latest = git.latest_release(discovery.find_git(), source)
+            if latest is None:
+                raise PackageError(
+                    f"{source} has no release tags like 1.2.3, pass --branch or --revision"
+                )
+            requirement = Requirement("from", latest)
+        return Dependency(name=key, url=source, requirement=requirement, products=tuple(products))
+
+    if requirement is not None:
+        raise PackageError(f"{source} is a local path, which takes no version rule")
+    location = Path(project_dir) / source
+    if not (location / "Package.swift").is_file():
+        raise PackageError(f"{source} is neither a git url nor a folder holding a Package.swift")
+    key = name or location.resolve().name
+    return Dependency(name=key, path=Path(source).as_posix(), products=tuple(products))
+
+
+# edit reverts unless the package resolves and builds a graph
+def add_dependency(
+    project_dir: Path | str,
+    source: str,
+    name: str | None = None,
+    requirement: Requirement | None = None,
+    products: Sequence[str] = (),
+    settings: Settings | None = None,
+) -> tuple[Dependency, DependencyReport]:
+    project = open_project(project_dir)
+    dependency = dependency_from_source(project_dir, source, name, requirement, products)
+    manifest_path = manifest_module.path_for(project_dir)
+    original = manifest_path.read_bytes()
+    edited = manifest_module.add_dependency(original.decode("utf-8"), dependency)
+    lock = packages.project_lock(project.layout)
+    lock_before = lock.read_bytes() if lock.is_file() else None
+
+    write_atomic(manifest_path, edited.encode("utf-8"))
+    try:
+        report = resolve_dependencies(project_dir, settings)
+    except BaseException:
+        write_atomic(manifest_path, original)
+        if lock_before is None:
+            lock.unlink(missing_ok=True)
+        else:
+            write_atomic(lock, lock_before)
+        raise
+    return dependency, report
 
 
 def clean(project_dir: Path | str) -> Path:

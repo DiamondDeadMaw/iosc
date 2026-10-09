@@ -11,7 +11,7 @@ Prereqs:
 - The windows swift toolchain, which gives us the compiler: <https://www.swift.org/install/windows/>
 - Apple Mobile Device Support, required to install (building signing and packaging work without) the app to a phone. Get it here: https://apps.microsoft.com/detail/9np83lwlpz9k?hl=en-US&gl=IN. Alternatively, iTunes also works. 
 - MinGW-w64, for `g++` on your PATH. Builds the ADI native bridge used for free Apple ID signing. Get it here: <https://www.mingw-w64.org/downloads/>
-- Visual Studio Build Tools, with the C++ workload and the Windows SDK. Builds the Swift macro plugins that make SwiftUI and SwiftData work. Get it here: <https://visualstudio.microsoft.com/downloads/> (you do not need full Visual Studio)
+- Visual Studio Build Tools, with the C++ workload and the Windows SDK. Builds the Swift macro plugins that make SwiftUI and SwiftData work, and lets iosc read Swift packages. Get it here: <https://visualstudio.microsoft.com/downloads/> (you do not need full Visual Studio)
 
 Build the exe:
 
@@ -52,6 +52,35 @@ Apple SDK frameworks go in the `frameworks` list in `iosc.toml`, by their exact 
 System libraries like SQLite are passed to the linker. Create a `linker_flags` list and pass whatever the linker would expect:
 
     linker_flags = ["-lsqlite3"]
+
+### Using a Swift package
+
+Run `iosc deps add` with a git url or a local path:
+
+    iosc deps add https://github.com/Alamofire/Alamofire
+    iosc deps add https://github.com/apple/swift-collections --product OrderedCollections
+    iosc deps add ../MyLib
+
+This adds the package to `iosc.toml` and pins its version. If the package cannot be used, no changes are made.
+
+You can also edit `iosc.toml` yourself. Each package is one line under `[dependencies]`:
+
+    [dependencies]
+    Collections = { url = "https://github.com/apple/swift-collections", from = "1.1.0", products = ["OrderedCollections"] }
+    Kit = { url = "git@github.com:me/kit.git", branch = "main" }
+    Pinned = { url = "https://github.com/x/y", exact = "2.3.1" }
+    Ranged = { url = "https://github.com/x/z", range = "1.2.0..<1.5.0" }
+    MyLib = { path = "../MyLib" }
+
+A url takes exactly one of `from`, `exact`, `range` (`"a..<b"` or `"a...b"`, as in Swift), `branch` or `revision`, with the same meaning SwiftPM gives them.
+
+`products` picks which libraries to link. If not included,  iosc takes the product named after the dependency, then the package, then every library the package offers. `iosc build` compiles each package target as its own module and links it. 
+
+The first build clones the packages into `build/packages`. The versions it picked are written to `Package.resolved` next to `iosc.toml`, so later builds will use the local cache, pointed to by the versioning info saved. `iosc clean` removes the clones. `iosc deps update` moves the pins to the newest versions allowed by the rules in the toml. `iosc deps show` lists what is pinned and which modules get built.
+
+Package resources work as they do in Xcode. Each target with resources gets a `<Package>_<Target>.bundle` in the app, and `Bundle.module` finds it. Metal shaders, Core Data and Core ML models inside a package are not supported for now.
+
+For now only Swift targets work. C or Objective-C targets, prebuilt binaries, registry ids and packages that include their own macros are refused with an error naming the package and target.
 
 ### Reading file:line in a crash report
 
@@ -115,6 +144,18 @@ Every command also takes `--project <dir>` (defaults to the current directory),
         --force                        sign even if a valid signature already exists
 
     iosc package                    bundle the signed .app into an installable .ipa
+
+    iosc deps add <url|path>        add a Swift package to iosc.toml, resolve it and pin it
+        --from|--exact|--range|--branch|--revision <value>
+                                       version rule, default from the latest release tag
+        --product <name>               library to link, repeatable
+        --name <name>                  key in iosc.toml, default the repository or folder name
+
+    iosc deps resolve               resolve the packages now and pin them in Package.resolved
+
+    iosc deps update [names]        move pinned packages to the newest versions their rules allow
+
+    iosc deps show                  list packages, pinned versions and the modules they build
 
     iosc devices                    list iOS devices attached over USB
 
@@ -218,7 +259,7 @@ Music v6.5.2 `.apkm`, move it to this path, then run:
 - No ide, visual editor, swiftUI canvas, or preview. 
 - No debugger
 - No simulator (yet)
-- No Swift package manager (next item on the todo list)
+- Swift packages are Swift targets only for now. C and Objective-C targets are the next item on the todo list
 - No XCTest equivalent/support
 - No core data- you will need to use swift data instead. 
 - No App Intents (@AppEntity is not complete as of now). So no shortcuts or siri.

@@ -84,6 +84,16 @@ def find_swiftc(settings: Settings | None = None) -> Path:
     raise ToolchainError(f"Could not find swiftc. Searched {', '.join(searched)}")
 
 
+def find_git() -> Path:
+    found = shutil.which("git")
+    if not found:
+        raise ToolchainError(
+            "git not found on PATH. Swift packages from a url need it, "
+            "get it from https://git-scm.com/download/win"
+        )
+    return Path(found)
+
+
 def find_linker(swift_bin_dir: Path | None = None) -> Path:
     try:
         linker = paths.require(paths.ld64_lld())

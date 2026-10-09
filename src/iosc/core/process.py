@@ -174,6 +174,7 @@ def run_streaming(
     env: dict[str, str] | None = None,
     timeout: float | None = None,
     check: bool = True,
+    merge_stderr: bool = False,
 ) -> CompletedProcess:
     reporter = get_reporter()
     reporter.detail(format_argv(argv))
@@ -185,7 +186,8 @@ def run_streaming(
             cwd=str(cwd) if cwd is not None else None,
             env=resolve_env(env),
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # some tools report progress on stderr
+            stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
             text=False,
             stdin=subprocess.DEVNULL,
         )
@@ -237,6 +239,8 @@ def run_streaming(
     reporter.detail(f"Process exited with code {proc.returncode} in {duration:.3f}s")
     stdout = b"".join(stdout_chunks).decode("utf-8", errors="replace")
     stderr = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+    if merge_stderr:
+        stderr = stdout
 
     if timed_out:
         raise ExternalToolError(

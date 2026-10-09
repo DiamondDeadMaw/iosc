@@ -7,6 +7,7 @@ from iosc.cli.commands import (
     build as build_cmd,
     clean as clean_cmd,
     crash as crash_cmd,
+    deps as deps_cmd,
     dev as dev_cmd,
     devices as devices_cmd,
     init as init_cmd,
@@ -19,6 +20,7 @@ from iosc.cli.commands import (
     sign as sign_cmd,
     toolchain as toolchain_cmd,
 )
+from iosc.config.manifest import REQUIREMENT_KINDS
 from iosc.core import logging
 from iosc.core.errors import IoscError, UsageError
 
@@ -106,6 +108,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     package_parser = subparsers.add_parser("package", parents=[common])
     package_parser.set_defaults(handler=package_cmd.run)
+
+    deps_parser = subparsers.add_parser("deps", parents=[common])
+    deps_subparsers = deps_parser.add_subparsers(dest="subcommand", required=True)
+
+    deps_show = deps_subparsers.add_parser("show", parents=[common])
+    deps_show.set_defaults(handler=deps_cmd.run)
+
+    deps_resolve = deps_subparsers.add_parser("resolve", parents=[common])
+    deps_resolve.set_defaults(handler=deps_cmd.run)
+
+    deps_update = deps_subparsers.add_parser("update", parents=[common])
+    deps_update.add_argument("packages", nargs="*")
+    deps_update.set_defaults(handler=deps_cmd.run)
+
+    deps_add = deps_subparsers.add_parser("add", parents=[common])
+    deps_add.add_argument("source")
+    deps_add.add_argument("--name", default=None)
+    deps_add.add_argument("--product", action="append", default=[])
+    for kind in REQUIREMENT_KINDS:
+        deps_add.add_argument(f"--{kind}", dest=kind, default=None)
+    deps_add.set_defaults(handler=deps_cmd.run)
 
     devices_parser = subparsers.add_parser("devices", parents=[common])
     devices_parser.set_defaults(handler=devices_cmd.run)
