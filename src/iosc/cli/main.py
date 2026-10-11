@@ -18,11 +18,14 @@ from iosc.cli.commands import (
     run as run_cmd,
     sdk as sdk_cmd,
     sign as sign_cmd,
+    sim as sim_cmd,
     toolchain as toolchain_cmd,
 )
 from iosc.config.manifest import REQUIREMENT_KINDS
 from iosc.core import logging
 from iosc.core.errors import IoscError, UsageError
+from iosc.simulator.privacy import ACTIONS as PRIVACY_ACTIONS
+from iosc.simulator.session import LOG_LEVELS
 
 
 class IoscArgumentParser(argparse.ArgumentParser):
@@ -41,6 +44,66 @@ def add_signing_arguments(parser: argparse.ArgumentParser) -> None:
         "--revoke-and-reissue", dest="revoke_and_reissue", action="store_true"
     )
     parser.add_argument("--force", action="store_true")
+
+
+def add_sim_boot_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--log-level", dest="log_level", choices=LOG_LEVELS, default=None)
+    parser.add_argument("--log-all", dest="log_all", action="store_true")
+    parser.add_argument("--timeout", type=float, default=300.0)
+
+
+def add_sim_launch_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--env", action="append", default=[])
+    # everything after the separator goes to the app straight
+    parser.add_argument("app_args", nargs=argparse.REMAINDER, default=[])
+
+
+def add_sim_parser(subparsers, common: argparse.ArgumentParser) -> None:
+    sim_parser = subparsers.add_parser("sim", parents=[common])
+    sim_subparsers = sim_parser.add_subparsers(dest="subcommand", required=True)
+
+    sim_build = sim_subparsers.add_parser("build", parents=[common])
+    sim_build.add_argument("--force", action="store_true")
+
+    sim_boot = sim_subparsers.add_parser("boot", parents=[common])
+    add_sim_boot_arguments(sim_boot)
+    # everything after the separator goes to the sim
+    sim_boot.add_argument("iossim_args", nargs=argparse.REMAINDER, default=[])
+
+    sim_run = sim_subparsers.add_parser("run", parents=[common])
+    add_sim_boot_arguments(sim_run)
+    sim_run.add_argument("--no-build", dest="no_build", action="store_true")
+    sim_run.add_argument("--force", action="store_true")
+    sim_run.add_argument("--no-launch", dest="no_launch", action="store_true")
+    sim_run.add_argument("--follow", action="store_true")
+    add_sim_launch_arguments(sim_run)
+
+    sim_install = sim_subparsers.add_parser("install", parents=[common])
+    sim_install.add_argument("app", nargs="?", default=None)
+
+    sim_launch = sim_subparsers.add_parser("launch", parents=[common])
+    sim_launch.add_argument("bundle_id", nargs="?", default=None)
+    add_sim_launch_arguments(sim_launch)
+
+    sim_terminate = sim_subparsers.add_parser("terminate", parents=[common])
+    sim_terminate.add_argument("bundle_id", nargs="?", default=None)
+
+    sim_subparsers.add_parser("status", parents=[common])
+
+    sim_stop = sim_subparsers.add_parser("stop", parents=[common])
+    sim_stop.add_argument("--force", action="store_true")
+
+    sim_screenshot = sim_subparsers.add_parser("screenshot", parents=[common])
+    sim_screenshot.add_argument("out")
+
+    sim_privacy = sim_subparsers.add_parser("privacy", parents=[common])
+    sim_privacy.add_argument("action", choices=PRIVACY_ACTIONS)
+    sim_privacy.add_argument("service")
+    sim_privacy.add_argument("bundle_id", nargs="?", default=None)
+
+    for sub in sim_subparsers.choices.values():
+        sub.set_defaults(handler=sim_cmd.run)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -186,6 +249,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--no-log", dest="no_log", action="store_true")
     run_parser.add_argument("--launch", action="store_true")
     run_parser.set_defaults(handler=run_cmd.run)
+
+    add_sim_parser(subparsers, common)
 
     clean_parser = subparsers.add_parser("clean", parents=[common])
     clean_parser.set_defaults(handler=clean_cmd.run)

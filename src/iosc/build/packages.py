@@ -1235,7 +1235,7 @@ def package_stages(
             )
         )
         if target.bundle is not None:
-            stages.append(resources_stage(target, layout, deployment_target))
+            stages.append(resources_stage(target, layout, deployment_target, simulator))
     return stages
 
 
@@ -1247,7 +1247,9 @@ def resource_stage_names(graph: PackageGraph) -> list[str]:
     return [resources_stage_name(t.module) for t in graph.targets if t.bundle is not None]
 
 
-def resources_stage(target: PackageTarget, layout: BuildLayout, deployment_target: str) -> Stage:
+def resources_stage(
+    target: PackageTarget, layout: BuildLayout, deployment_target: str, simulator: bool = False
+) -> Stage:
     if target.bundle is None:
         raise PackageError(f"package {target.package} target {target.name} has no resource bundle")
     bundle = bundle_path(layout, target.bundle)
@@ -1269,7 +1271,7 @@ def resources_stage(target: PackageTarget, layout: BuildLayout, deployment_targe
 
     def run() -> None:
         produced = package_resources.assemble_bundle(
-            bundled, bundle, target.region, deployment_target
+            bundled, bundle, target.region, deployment_target, simulator
         )
         write_output_manifest(produced_path, layout.project, produced)
         get_reporter().detail(f"bundled {len(bundled)} resources into {bundle.name}")

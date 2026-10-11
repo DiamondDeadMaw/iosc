@@ -23,9 +23,11 @@ class BuildLayout:
     cache: Path
 
 
-def layout_for(project: Path | str, app_name: str) -> BuildLayout:
+def layout_for(project: Path | str, app_name: str, simulator: bool = False) -> BuildLayout:
     project_dir = Path(project).resolve()
     root = project_dir / "build"
+    if simulator:
+        root = root / "sim"
     return BuildLayout(
         project=project_dir,
         root=root,

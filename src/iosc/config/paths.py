@@ -101,6 +101,36 @@ def sdk_root() -> ExternalAsset:
     )
 
 
+def simulator_sdk_root() -> ExternalAsset:
+    return ExternalAsset(
+        name="simulator_sdk_root",
+        path=(
+            external_root()
+            / "xcode"
+            / "Platforms"
+            / "iPhoneSimulator.platform"
+            / "Developer"
+            / "SDKs"
+            / "iPhoneSimulator.sdk"
+        ),
+        hint="Run 'iosc sdk extract <xip>' again to extract the iOS Simulator SDK.",
+    )
+
+def iossim_dir() -> Path:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    return base / "iossim"
+
+
+def simulator_install() -> ExternalAsset:
+    override = os.environ.get("IOSC_SIMULATOR")
+    return ExternalAsset(
+        name="simulator_install",
+        path=Path(override) if override else iossim_dir() / "install.json",
+        hint="The iOS simulator is not installed. Run setup.py in ios_simulator.",
+    )
+
+
 # public apple CA files. user places them here per README
 # iosc never fetches them
 APPLE_INTERMEDIATES = ("AppleWWDRCAG3.cer", "AppleIncRootCertificate.cer")
@@ -212,25 +242,33 @@ def exists(asset: ExternalAsset) -> bool:
 # swift needs builtins like ___isPlatformVersionAtLeast that the sdk lacks
 # clang version dir floats, take the newest
 def clang_rt_ios() -> Path | None:
+    return _clang_rt("libclang_rt.ios.a")
+
+
+def clang_rt_iossim() -> Path | None:
+    return _clang_rt("libclang_rt.iossim.a")
+
+
+def _clang_rt(name: str) -> Path | None:
     clang_root = (
         external_root() / "xcode" / "Toolchains" / "XcodeDefault.xctoolchain"
         / "usr" / "lib" / "clang"
     )
     if not clang_root.is_dir():
         return None
-    candidates = sorted(clang_root.glob("*/lib/darwin/libclang_rt.ios.a"))
+    candidates = sorted(clang_root.glob(f"*/lib/darwin/{name}"))
     return candidates[-1] if candidates else None
 
 
 # swift libs copied into apps deployed below their os
 # newest swift first, first match wins
-def swift_backdeploy_dirs() -> list[Path]:
+def swift_backdeploy_dirs(platform: str = "iphoneos") -> list[Path]:
     lib_root = (
         external_root() / "xcode" / "Toolchains" / "XcodeDefault.xctoolchain" / "usr" / "lib"
     )
     if not lib_root.is_dir():
         return []
-    found = [p for p in lib_root.glob("swift-*/iphoneos") if p.is_dir()]
+    found = [p for p in lib_root.glob(f"swift-*/{platform}") if p.is_dir()]
     return sorted(found, key=lambda p: _version_key(p.parent.name), reverse=True)
 
 

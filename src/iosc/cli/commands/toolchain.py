@@ -6,6 +6,7 @@ from iosc.core import logging
 from iosc.core.color import BOLD, CYAN, DIM, GREEN, RED, YELLOW, paint
 from iosc.core.errors import IoscError, MissingExternalAsset
 from iosc.device import list_devices
+from iosc.simulator import install as simulator_install
 from iosc.toolchain import discovery, fetch, msvc
 
 
@@ -50,6 +51,11 @@ def _describe_anisette() -> str:
     return "ready, native bridge and ADI libraries present"
 
 
+def _describe_simulator() -> str:
+    installation = simulator_install.load()
+    return f"iOS {installation.runtime} at {installation.root}"
+
+
 def run_status(args) -> None:
     settings: Settings = load_settings()
     checks = [
@@ -78,6 +84,8 @@ def run_status(args) -> None:
         _probe("llvm-symbolizer (file:line in crashes)", lambda: paths.require(paths.llvm_symbolizer_tool())),
         _probe("msvc build tools (swift packages)", msvc.find_vcvarsall),
         _probe("git (swift packages from a url)", discovery.find_git),
+        _probe("simulator sdk (iosc sim)", lambda: paths.require(paths.simulator_sdk_root())),
+        _probe("simulator (iosc sim)", _describe_simulator),
     ]
 
     external = str(paths.external_root())

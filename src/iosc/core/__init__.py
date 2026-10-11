@@ -17,6 +17,7 @@ from iosc.core.errors import (
     PackageError,
     SdkError,
     SigningError,
+    SimulatorError,
     ToolchainError,
     UsageError,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "Reporter",
     "SdkError",
     "SigningError",
+    "SimulatorError",
     "ToolchainError",
     "UsageError",
     "configure",

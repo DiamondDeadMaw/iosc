@@ -104,9 +104,17 @@ def spawn_background(
     argv: list[str],
     cwd: str | Path | None = None,
     env: dict[str, str] | None = None,
+    detached: bool = False,
 ) -> subprocess.Popen:
     reporter = get_reporter()
     reporter.detail(format_argv(argv))
+    # detached outlives iosc and ignores Ctrl+C in its console
+    flags = (
+        getattr(subprocess, "DETACHED_PROCESS", 0)
+        | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if detached
+        else 0
+    )
     try:
         return subprocess.Popen(
             argv,
@@ -115,6 +123,7 @@ def spawn_background(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
+            creationflags=flags,
         )
     except FileNotFoundError as err:
         target = argv[0] if argv else "unknown"

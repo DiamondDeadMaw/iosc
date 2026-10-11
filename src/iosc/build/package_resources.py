@@ -152,7 +152,9 @@ def embedded_source(resources: Sequence[PackageResource]) -> str:
     return "\n".join(lines)
 
 
-def bundle_info(name: str, region: str | None, deployment_target: str) -> dict[str, Any]:
+def bundle_info(
+    name: str, region: str | None, deployment_target: str, simulator: bool = False
+) -> dict[str, Any]:
     stem = name[: -len(BUNDLE_SUFFIX)]
     identifier = RE_BUNDLE_ID_UNSAFE.sub("-", stem.replace("_", ".")) + ".resources"
     return {
@@ -161,7 +163,7 @@ def bundle_info(name: str, region: str | None, deployment_target: str) -> dict[s
         "CFBundleInfoDictionaryVersion": "6.0",
         "CFBundleName": stem,
         "CFBundlePackageType": "BNDL",
-        "CFBundleSupportedPlatforms": ["iPhoneOS"],
+        "CFBundleSupportedPlatforms": ["iPhoneSimulator" if simulator else "iPhoneOS"],
         "MinimumOSVersion": deployment_target,
     }
 
@@ -214,12 +216,13 @@ def assemble_bundle(
     bundle: Path,
     region: str | None,
     deployment_target: str,
+    simulator: bool = False,
 ) -> list[Path]:
     staging = bundle.with_name(bundle.name + ".partial")
     rmtree_force(staging)
     ensure_dir(staging)
     (staging / "Info.plist").write_bytes(
-        write_plist(bundle_info(bundle.name, region, deployment_target), binary=True)
+        write_plist(bundle_info(bundle.name, region, deployment_target, simulator), binary=True)
     )
 
     catalogs = [r.path for r in resources if r.path.suffix.lower() == assets.CATALOG_SUFFIX]

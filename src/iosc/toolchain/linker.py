@@ -21,6 +21,8 @@ class LinkSpec:
     rpaths: list[str] = field(default_factory=list)
     extra_flags: list[str] = field(default_factory=list)
     simulator: bool = False
+    # simulator apps carry entitlements in a section, not the signature
+    entitlements: Path | None = None
 
 
 def build_link_argv(toolchain: Toolchain, spec: LinkSpec) -> list[str]:
@@ -49,6 +51,8 @@ def build_link_argv(toolchain: Toolchain, spec: LinkSpec) -> list[str]:
         argv.append(str(spec.clang_rt))
     for rpath in spec.rpaths:
         argv.extend(["-rpath", rpath])
+    if spec.entitlements is not None:
+        argv.extend(["-sectcreate", "__TEXT", "__entitlements", str(spec.entitlements)])
     for flag in spec.extra_flags:
         argv.append(flag)
     argv.extend(["-o", str(spec.output)])

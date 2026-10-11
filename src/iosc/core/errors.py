@@ -105,6 +105,10 @@ class InstallError(IoscError):
     pass
 
 
+class SimulatorError(IoscError):
+    pass
+
+
 class DebugError(IoscError):
     pass
 

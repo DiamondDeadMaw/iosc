@@ -9,7 +9,9 @@ from iosc.build.packages import PackageGraph
 from iosc.build.packages import object_paths
 from iosc.config import paths
 from iosc.config.manifest import Manifest
+from iosc.core import write_atomic
 from iosc.core.progress import Heartbeat
+from iosc.formats.plist import write_plist
 from iosc.toolchain.discovery import Toolchain
 from iosc.toolchain.linker import LinkSpec, link
 
@@ -20,6 +22,10 @@ APP_RPATHS = ("@executable_path/Frameworks",)
 
 def executable_path(layout: BuildLayout, product_name: str) -> Path:
     return layout.obj / product_name
+
+
+def entitlements_plist_path(layout: BuildLayout) -> Path:
+    return layout.obj / "entitlements.plist"
 
 
 def link_stage(
@@ -40,6 +46,8 @@ def link_stage(
     frameworks = list(manifest.frameworks)
     frameworks += [f for f in graph.frameworks if f not in frameworks]
     frameworks += xcframework.linked_frameworks(graph.binaries)
+    entitlements = dict(manifest.entitlements) if simulator else {}
+    entitlements_path = entitlements_plist_path(layout) if entitlements else None
     spec = LinkSpec(
         objects=objects,
         output=output,
@@ -47,10 +55,11 @@ def link_stage(
         deployment_target=manifest.deployment_target,
         frameworks=frameworks,
         framework_dirs=xcframework.framework_dirs(graph.binaries),
-        clang_rt=paths.clang_rt_ios(),
+        clang_rt=paths.clang_rt_iossim() if simulator else paths.clang_rt_ios(),
         rpaths=list(APP_RPATHS),
         extra_flags=list(manifest.linker_flags),
         simulator=simulator,
+        entitlements=entitlements_path,
     )
     spec = replace(
         spec,
@@ -69,10 +78,13 @@ def link_stage(
             "clang_rt": spec.clang_rt.name if spec.clang_rt else None,
             "rpaths": list(spec.rpaths),
             "linker_flags": list(manifest.linker_flags),
+            "entitlements": entitlements or None,
         }
     )
 
     def run() -> None:
+        if entitlements_path is not None:
+            write_atomic(entitlements_path, write_plist(entitlements, binary=False))
         with Heartbeat(f"linking {product_name}"):
             link(toolchain, spec)
 

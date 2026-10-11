@@ -48,7 +48,13 @@ def partial_plist_path(layout: BuildLayout) -> Path:
     return layout.root / PARTIAL_PLIST_NAME
 
 
-def default_info_plist(manifest: Manifest, executable: str) -> dict[str, Any]:
+def supported_platform(simulator: bool) -> str:
+    return "iPhoneSimulator" if simulator else "iPhoneOS"
+
+
+def default_info_plist(
+    manifest: Manifest, executable: str, simulator: bool = False
+) -> dict[str, Any]:
     return {
         "CFBundleName": manifest.name,
         "CFBundleDisplayName": manifest.name,
@@ -58,9 +64,9 @@ def default_info_plist(manifest: Manifest, executable: str) -> dict[str, Any]:
         "CFBundleExecutable": executable,
         "CFBundlePackageType": "APPL",
         "CFBundleInfoDictionaryVersion": "6.0",
-        "CFBundleSupportedPlatforms": ["iPhoneOS"],
+        "CFBundleSupportedPlatforms": [supported_platform(simulator)],
         "MinimumOSVersion": manifest.deployment_target,
-        "DTPlatformName": "iphoneos",
+        "DTPlatformName": supported_platform(simulator).lower(),
         "LSRequiresIPhoneOS": True,
         "UIRequiredDeviceCapabilities": ["arm64"],
         "UILaunchScreen": {},
@@ -85,8 +91,9 @@ def build_info_plist(
     manifest: Manifest,
     executable: str,
     asset_partial: dict[str, Any] | None = None,
+    simulator: bool = False,
 ) -> dict[str, Any]:
-    info = default_info_plist(manifest, executable)
+    info = default_info_plist(manifest, executable, simulator)
     if asset_partial:
         info = merge_partial(info, asset_partial)
     # apply manifest table last to win ties
@@ -172,10 +179,11 @@ def assemble(
     nested: Sequence[Path] = (),
     swift_library_dirs: Sequence[Path] = (),
     frameworks: Sequence[Path] = (),
+    simulator: bool = False,
 ) -> Path:
     read_macho_arch(executable)
     info = build_info_plist(
-        manifest, product, read_asset_partial(partial_plist_path(layout))
+        manifest, product, read_asset_partial(partial_plist_path(layout)), simulator
     )
 
     staging_app = layout.staging / f"{product}.app"
@@ -258,6 +266,7 @@ def bundle_stage(
     nested: Sequence[Path] = (),
     swift_library_dirs: Sequence[Path] = (),
     frameworks: Sequence[Path] = (),
+    simulator: bool = False,
 ) -> Stage:
     resources = collect_resources(manifest, layout.project)
 
@@ -265,7 +274,7 @@ def bundle_stage(
     # may not exist yet at plan time
     print_ = fingerprint(
         {
-            "info_plist": build_info_plist(manifest, product),
+            "info_plist": build_info_plist(manifest, product, simulator=simulator),
             "resources": [relative_key(p, layout.project) for p in resources],
             "nested": [relative_key(p, layout.project) for p in nested],
             "swift_library_dirs": [str(p) for p in swift_library_dirs],
@@ -274,7 +283,9 @@ def bundle_stage(
     )
 
     def run() -> None:
-        assemble(manifest, layout, executable, product, nested, swift_library_dirs, frameworks)
+        assemble(
+            manifest, layout, executable, product, nested, swift_library_dirs, frameworks, simulator
+        )
 
     return Stage(
         name=STAGE_NAME,

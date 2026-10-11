@@ -77,18 +77,21 @@ class SignResult:
     summary: SignSummary
 
 
-def open_project(project_dir: Path | str) -> Project:
+def open_project(project_dir: Path | str, simulator: bool = False) -> Project:
     manifest = manifest_module.load(Path(project_dir))
     product = bundle.product_name(manifest)
-    return Project(manifest, layout_for(project_dir, product), product)
+    return Project(manifest, layout_for(project_dir, product, simulator), product)
 
 
 def toolchain_identity(toolchain: Toolchain, sdk_root: Path) -> str:
     return f"{toolchain.swift_version}|{toolchain.linker}|{sdk_root}"
 
 
-def resolve_toolchain(settings: Settings | None = None) -> tuple[Toolchain, Path]:
-    return discovery.detect(settings), paths.require(paths.sdk_root())
+def resolve_toolchain(
+    settings: Settings | None = None, simulator: bool = False
+) -> tuple[Toolchain, Path]:
+    sdk = paths.simulator_sdk_root() if simulator else paths.sdk_root()
+    return discovery.detect(settings), paths.require(sdk)
 
 
 def plan_build(
@@ -127,8 +130,11 @@ def plan_build(
                 *packages.resource_stage_names(graph),
             ),
             nested=packages.resource_bundles(graph, layout),
-            swift_library_dirs=paths.swift_backdeploy_dirs(),
+            swift_library_dirs=paths.swift_backdeploy_dirs(
+                "iphonesimulator" if simulator else "iphoneos"
+            ),
             frameworks=xcframework.embedded_frameworks(graph.binaries),
+            simulator=simulator,
         ),
     ]
 
@@ -139,9 +145,12 @@ def build(
     settings: Settings | None = None,
     simulator: bool = False,
 ) -> BuildResult:
-    project = open_project(project_dir)
-    toolchain, sdk_root = resolve_toolchain(settings)
+    project = open_project(project_dir, simulator)
+    toolchain, sdk_root = resolve_toolchain(settings, simulator)
     stages = plan_build(project, toolchain, sdk_root, simulator)
+    # no need ot sign w real id for sim
+    if simulator:
+        stages.append(sign_stage(project, None, None, depends_on=(bundle.STAGE_NAME,)))
 
     report = execute(
         stages, project.layout, toolchain_identity(toolchain, sdk_root), force=force
@@ -303,8 +312,8 @@ def sign(
     settings: Settings | None = None,
     simulator: bool = False,
 ) -> SignResult:
-    project = open_project(project_dir)
-    toolchain, sdk_root = resolve_toolchain(settings)
+    project = open_project(project_dir, simulator)
+    toolchain, sdk_root = resolve_toolchain(settings, simulator)
 
     stages = plan_build(project, toolchain, sdk_root, simulator)
     stages.append(
