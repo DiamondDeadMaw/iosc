@@ -41,6 +41,11 @@ class Toolchain:
     swift_version: str
     macro_plugins: tuple[MacroPlugin, ...] = field(default_factory=tuple)
 
+    # clang from the swift toolchain builds C family sources
+    @property
+    def clang(self) -> Path:
+        return self.swift_bin_dir / f"clang{self.swiftc.suffix}"
+
 
 _SWIFT_VERSION_CACHE: dict[Path, str] = {}
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from iosc.build import package_resources
+from iosc.build import package_clang, package_resources, xcframework
 from iosc.build.graph import (
     BuildLayout,
     Stage,
@@ -18,13 +18,14 @@ from iosc.build.graph import (
 )
 from iosc.build.package_resources import PackageResource
 from iosc.config.manifest import Dependency, Manifest
+from iosc.config import paths
 from iosc.core import PackageError, get_reporter, sha256_file, write_atomic
 from iosc.core.progress import Heartbeat
-from iosc.toolchain import msvc, swiftpm
+from iosc.toolchain import clang, msvc, swiftpm
 from iosc.toolchain.discovery import Toolchain, find_git
-from iosc.toolchain.swift import CompileSpec, compile_objects
+from iosc.toolchain.swift import CompileSpec, compile_objects, target_triple
 
-GRAPH_VERSION = 3
+GRAPH_VERSION = 5
 ROOT_PACKAGE = "iosc-dependencies"
 LOCK_FILE = "Package.resolved"
 STAGE_PREFIX = "package "
@@ -32,6 +33,7 @@ RESOURCES_SUFFIX = " resources"
 PLATFORM = "ios"
 CONFIGURATION = "debug"
 PACKAGE_DEFINES = ("SWIFT_PACKAGE", "DEBUG")
+CLANG_DEFINES = ("SWIFT_PACKAGE=1", "DEBUG=1")
 SUPPORTED_LANGUAGE_MODES = ("4", "4.2", "5", "6")
 # warning flags only change diagnostics, swiftpm drops them for deps
 IGNORED_SWIFT_SETTINGS = {
@@ -62,6 +64,10 @@ class PackageTarget:
     # bundle name, None when only embedded resources
     bundle: str | None = None
     region: str | None = None
+    # names of the binary targets it depends on directly
+    binaries: tuple[str, ...] = ()
+    # set for a C family target, which has no Swift settings
+    clang: package_clang.ClangTarget | None = None
 
 
 @dataclass(frozen=True)
@@ -69,6 +75,23 @@ class PackageGraph:
     # dependency order, imports first
     targets: tuple[PackageTarget, ...] = ()
     package_roots: tuple[Path, ...] = field(default_factory=tuple)
+    binaries: tuple[xcframework.Binary, ...] = ()
+
+    # targets a target sees, through its dependencies and the targets
+    def reachable_targets(self, target: PackageTarget) -> list[PackageTarget]:
+        by_module = {t.module: t for t in self.targets}
+        seen: set[str] = set()
+        pending = [target]
+        while pending:
+            for module in pending.pop().dependencies:
+                if module not in seen:
+                    seen.add(module)
+                    pending.append(by_module[module])
+        return [t for t in self.targets if t.module in seen]
+
+    def reachable_binaries(self, target: PackageTarget) -> list[xcframework.Binary]:
+        names = {n for t in (target, *self.reachable_targets(target)) for n in t.binaries}
+        return [b for b in self.binaries if b.name in names]
 
     @property
     def frameworks(self) -> list[str]:
@@ -76,7 +99,9 @@ class PackageGraph:
 
     @property
     def libraries(self) -> list[str]:
-        return _ordered_union(t.libraries for t in self.targets)
+        # clang links the c++ runtime for C++ sources, ld64 needs it named
+        cxx = ["c++"] if any(t.clang is not None and t.clang.cxx for t in self.targets) else []
+        return _ordered_union([*(t.libraries for t in self.targets), cxx])
 
 
 def _ordered_union(groups: Iterable[Sequence[str]]) -> list[str]:
@@ -98,6 +123,27 @@ def module_dir(layout: BuildLayout) -> Path:
 
 def object_path(layout: BuildLayout, module: str) -> Path:
     return packages_dir(layout) / "obj" / f"{module}.o"
+
+
+# one cache for every project. swiftpm keeps its repositories and zips here and iosc its unpacked binaries
+def shared_cache() -> Path:
+    cache = paths.cache_dir() / "packages"
+    if cache.is_file():
+        # an older iosc kept a package graph in this file
+        cache.unlink()
+        get_reporter().warn(f"removed {cache}, an old package graph cache that is now a folder")
+    return cache
+
+
+def clang_object_path(layout: BuildLayout, target: PackageTarget, source: Path, suffix: str = ".o") -> Path:
+    relative = source.relative_to(target.directory).as_posix()
+    return packages_dir(layout) / "obj" / target.module / f"{relative}{suffix}"
+
+
+def object_paths(target: PackageTarget, layout: BuildLayout) -> list[Path]:
+    if target.clang is None:
+        return [object_path(layout, target.module)]
+    return [clang_object_path(layout, target, s) for s in target.sources]
 
 
 def derived_dir(layout: BuildLayout, module: str) -> Path:
@@ -253,9 +299,18 @@ def _flatten_tree(node: dict[str, Any], into: dict[str, _Node]) -> None:
 
 
 class _GraphBuilder:
-    def __init__(self, packages: dict[str, _Package], deployment_target: str) -> None:
+    def __init__(
+        self,
+        packages: dict[str, _Package],
+        deployment_target: str,
+        cache: Path | None,
+        simulator: bool,
+    ) -> None:
         self.packages = packages
         self.deployment_target = deployment_target
+        self.cache = cache
+        self.simulator = simulator
+        self.binaries: dict[str, xcframework.Binary] = {}
         self.ordered: list[PackageTarget] = []
         self.visiting: set[tuple[str, str]] = set()
         self.done: dict[tuple[str, str], str] = {}
@@ -342,14 +397,10 @@ class _GraphBuilder:
     def _check_kind(self, package: _Package, name: str, described: dict[str, Any]) -> None:
         module_type = described.get("module_type")
         kind = described.get("type")
-        if module_type == "ClangTarget":
-            raise self.fail(package, name, "is C or Objective-C, which iosc does not build yet")
-        if module_type == "BinaryTarget" or kind == "binary":
-            raise self.fail(package, name, "is a prebuilt binary, which iosc does not link yet")
         if kind == "macro":
             raise self.fail(package, name, "is a Swift macro, which iosc does not build yet")
-        if module_type != "SwiftTarget" or kind != "library":
-            raise self.fail(package, name, f"is a {kind} target, only Swift libraries can be linked")
+        if module_type not in ("SwiftTarget", "ClangTarget") or kind != "library":
+            raise self.fail(package, name, f"is a {kind} target, only Swift and C family libraries can be linked")
 
     def _resources(self, package: _Package, name: str, described: dict[str, Any]) -> list[PackageResource]:
         entries = described.get("resources") or []
@@ -405,22 +456,29 @@ class _GraphBuilder:
         declared = package.declared_target(name)
         if described is None or declared is None:
             raise self.fail(package, name, "is missing from the package description")
+        if described.get("module_type") == "BinaryTarget" or described.get("type") == "binary":
+            return self.add_binary(package, name, declared, key)
         self._check_kind(package, name, described)
         if declared.get("pluginUsages"):
             raise self.fail(package, name, "uses build tool plugins, which iosc does not run")
         self._platform_check(package)
 
         dependencies = self._dependencies(package, name, declared)
+        binaries = [d for d in dependencies if d in self.binaries]
+        dependencies = [d for d in dependencies if d not in self.binaries]
 
+        is_clang = described.get("module_type") == "ClangTarget"
+        target_dir = package.path / described["path"]
         defines: list[str] = []
         upcoming: list[str] = []
         experimental: list[str] = []
         frameworks: list[str] = []
         libraries: list[str] = []
+        clang_flags: dict[str, list[str]] = {"c": [], "cxx": []}
         language_override: str | None = None
         for setting in declared.get("settings", []):
             tool = setting.get("tool")
-            if tool not in ("swift", "linker"):
+            if tool not in (("c", "cxx", "linker") if is_clang else ("swift", "linker")):
                 continue
             if not _condition_applies(setting.get("condition")):
                 continue
@@ -429,7 +487,12 @@ class _GraphBuilder:
                 raise self.fail(package, name, f"has a setting iosc cannot read, {setting}")
             kind, payload = next(iter(raw_kind.items()))
             value = payload.get("_0") if isinstance(payload, dict) else None
-            if kind == "define":
+            if tool in clang_flags:
+                try:
+                    clang_flags[tool].extend(package_clang.setting_flags(kind, value, target_dir))
+                except ValueError as err:
+                    raise self.fail(package, name, str(err)) from err
+            elif kind == "define":
                 defines.append(value)
             elif kind == "enableUpcomingFeature":
                 upcoming.append(value)
@@ -443,15 +506,23 @@ class _GraphBuilder:
                 libraries.append(value)
             elif kind in IGNORED_SWIFT_SETTINGS:
                 continue
+            elif kind == "unsafeFlags" and tool == "linker" and all(f.startswith("-l") for f in value):
+                libraries.extend(f[2:] for f in value)
             elif kind == "unsafeFlags":
                 raise self.fail(package, name, "uses unsafeFlags, which iosc does not pass through")
             else:
                 raise self.fail(package, name, f"uses the {kind} setting, which iosc does not support yet")
 
-        target_dir = package.path / described["path"]
         sources = tuple(target_dir / source for source in described.get("sources", []))
         if not sources:
             raise self.fail(package, name, "has no sources")
+        if is_clang:
+            for source in sources:
+                if clang.language_of(source) is None:
+                    what = "assembly" if source.suffix in (".s", ".S") else "not a C family source"
+                    raise self.fail(
+                        package, name, f"has {source.name}, which is {what}, iosc builds C, Objective-C and C++ only"
+                    )
 
         resources = self._resources(package, name, described)
         bundle = (
@@ -467,6 +538,16 @@ class _GraphBuilder:
                     f"module {module} comes from both package {existing.package} "
                     f"and package {package.identity}"
                 )
+        if module in self.binaries:
+            raise PackageError(
+                f"module {module} comes from both package {self.binaries[module].package} "
+                f"and package {package.identity}"
+            )
+
+        if is_clang:
+            for dependency in dependencies:
+                if next(t for t in self.ordered if t.module == dependency).clang is None:
+                    raise self.fail(package, name, f"depends on Swift target {dependency}, which C family targets cannot")
 
         self.ordered.append(
             PackageTarget(
@@ -476,7 +557,7 @@ class _GraphBuilder:
                 directory=target_dir,
                 sources=sources,
                 dependencies=tuple(dict.fromkeys(dependencies)),
-                swift_version=self._language_mode(package, language_override),
+                swift_version="" if is_clang else self._language_mode(package, language_override),
                 package_name=c99_name(package.identity) if declared.get("packageAccess") else None,
                 defines=tuple(defines),
                 upcoming_features=tuple(upcoming),
@@ -486,11 +567,51 @@ class _GraphBuilder:
                 resources=tuple(resources),
                 bundle=bundle,
                 region=package.description.get("default_localization"),
+                binaries=tuple(dict.fromkeys(binaries)),
+                clang=self._clang_target(package, declared, target_dir, module, sources, clang_flags) if is_clang else None,
             )
         )
         self.visiting.discard(key)
         self.done[key] = module
         return module
+
+    def _clang_target(
+        self,
+        package: _Package,
+        declared: dict[str, Any],
+        target_dir: Path,
+        module: str,
+        sources: Sequence[Path],
+        flags: dict[str, list[str]],
+    ) -> package_clang.ClangTarget:
+        include, module_map, map_text = package_clang.public_headers(
+            target_dir, declared.get("publicHeadersPath"), module
+        )
+        return package_clang.ClangTarget(
+            include_dir=include,
+            module_map=module_map,
+            map_text=map_text,
+            c_flags=tuple(flags["c"]),
+            cxx_flags=tuple(flags["cxx"]),
+            c_standard=package.manifest.get("cLanguageStandard"),
+            cxx_standard=package.manifest.get("cxxLanguageStandard"),
+            cxx=any(clang.language_of(s) in clang.CXX_LANGUAGES for s in sources),
+        )
+
+    def add_binary(self, package: _Package, name: str, declared: dict[str, Any], key: tuple[str, str]) -> str:
+        self._platform_check(package)
+        if declared.get("pluginUsages"):
+            raise self.fail(package, name, "uses build tool plugins, which iosc does not run")
+        if name in self.binaries or any(t.module == name for t in self.ordered):
+            raise PackageError(f"module {name} comes from more than one package")
+        if self.cache is None:
+            raise self.fail(package, name, "is a prebuilt binary, and no cache folder was given")
+        self.binaries[name] = xcframework.prepare(
+            package.identity, name, declared, package.path, self.cache, self.simulator
+        )
+        self.visiting.discard(key)
+        self.done[key] = name
+        return name
 
 
 def default_products(dependency: Dependency, package: _Package) -> list[str]:
@@ -521,6 +642,8 @@ def build_graph(
     descriptions: dict[str, dict[str, Any]],
     manifests: dict[str, dict[str, Any]],
     deployment_target: str,
+    cache: Path | None = None,
+    simulator: bool = False,
 ) -> PackageGraph:
     flat: dict[str, _Node] = {}
     _flatten_tree(tree, flat)
@@ -531,7 +654,7 @@ def build_graph(
         for identity, node in flat.items()
     }
 
-    builder = _GraphBuilder(packages, deployment_target)
+    builder = _GraphBuilder(packages, deployment_target, cache, simulator)
     for dependency, path in dependencies:
         package = _top_level_package(dependency, path, packages)
         for product in dependency.products or default_products(dependency, package):
@@ -540,6 +663,7 @@ def build_graph(
     return PackageGraph(
         targets=tuple(builder.ordered),
         package_roots=tuple(p.path for p in packages.values()),
+        binaries=tuple(builder.binaries.values()),
     )
 
 
@@ -561,11 +685,13 @@ def _graph_key(
     toolchain: Toolchain,
     deployment_target: str,
     lock: Path,
+    simulator: bool,
 ) -> str:
     return fingerprint(
         {
             "swift": toolchain.swift_version,
             "deployment_target": deployment_target,
+            "simulator": simulator,
             "dependencies": [
                 [
                     d.name,
@@ -628,9 +754,12 @@ def _serialize(graph: PackageGraph, key: str) -> dict[str, Any]:
                 "resources": [[str(r.path), r.rule, r.localization] for r in t.resources],
                 "bundle": t.bundle,
                 "region": t.region,
+                "binaries": list(t.binaries),
+                "clang": t.clang.to_json() if t.clang is not None else None,
             }
             for t in graph.targets
         ],
+        "binaries": [b.to_json() for b in graph.binaries],
     }
 
 
@@ -656,10 +785,27 @@ def _deserialize(data: dict[str, Any]) -> PackageGraph:
             ),
             bundle=t["bundle"],
             region=t["region"],
+            binaries=tuple(t["binaries"]),
+            clang=package_clang.ClangTarget.from_json(t["clang"]) if t["clang"] is not None else None,
         )
         for t in data["targets"]
     )
-    return PackageGraph(targets=targets, package_roots=tuple(Path(r) for r in data["manifests"]))
+    return PackageGraph(
+        targets=targets,
+        package_roots=tuple(Path(r) for r in data["manifests"]),
+        binaries=tuple(xcframework.Binary.from_json(b) for b in data["binaries"]),
+    )
+
+
+# a cached graph holds slice paths, so the unpacked folder and any local source must be unchanged
+def _binaries_current(binaries: Sequence[dict[str, Any]]) -> bool:
+    for binary in binaries:
+        if not Path(binary["slice_dir"]).is_dir():
+            return False
+        watch = binary["watch"]
+        if watch is not None and (not Path(watch).exists() or xcframework.path_pin(Path(watch)) != binary["pin"]):
+            return False
+    return True
 
 
 def _cached_graph(path: Path, key: str) -> PackageGraph | None:
@@ -676,6 +822,8 @@ def _cached_graph(path: Path, key: str) -> PackageGraph | None:
         for directory, listing in data["listings"].items():
             if not Path(directory).is_dir() or _listing_hash(Path(directory)) != listing:
                 return None
+        if not _binaries_current(data["binaries"]):
+            return None
         return _deserialize(data)
     except (KeyError, TypeError, AttributeError, ValueError):
         return None
@@ -760,12 +908,64 @@ def update_identities(manifest: Manifest, layout: BuildLayout, names: Sequence[s
     return list(dict.fromkeys(identities))
 
 
+# swiftpm cannot describe a target mixing Swift and C family sources
+def _describe(toolchain: Toolchain, identity: str, path: Path, state: Path, env: dict[str, str]) -> dict[str, Any]:
+    try:
+        return swiftpm.describe(toolchain, path, state, env)
+    except PackageError as err:
+        if "mixed language" in str(err):
+            raise PackageError(
+                f"package {identity} has a target mixing Swift and C family sources, "
+                f"which SwiftPM does not support, split it into a Swift target and a C target\n{err}"
+            ) from err
+        raise
+
+
+# swiftpm fetches every binary target at once and a slow link times out some of them
+# the zips that are missing are fetched here one by one into its cache, then it runs again
+def _with_artifacts(
+    toolchain: Toolchain,
+    state: Path,
+    env: dict[str, str],
+    cache: Path,
+    local_roots: Sequence[Path],
+    run: Callable[[], None],
+) -> None:
+    try:
+        run()
+    except PackageError:
+        if not _fetch_missing_artifacts(toolchain, state, env, cache, local_roots):
+            raise
+        run()
+
+
+def _fetch_missing_artifacts(
+    toolchain: Toolchain, state: Path, env: dict[str, str], cache: Path, local_roots: Sequence[Path]
+) -> bool:
+    fetched = False
+    for directory in [*sorted(p.parent for p in (state / "checkouts").glob("*/Package.swift")), *local_roots]:
+        try:
+            manifest = swiftpm.dump_package(toolchain, directory, state, env)
+        except PackageError:
+            continue
+        for target in manifest.get("targets", []):
+            url, checksum = target.get("url"), target.get("checksum")
+            if target.get("type") != "binary" or not url or not checksum:
+                continue
+            if not xcframework.has_archive(cache, url, checksum.lower()):
+                label = f"package {directory.name} target {target['name']}"
+                xcframework.fetch_archive(url, checksum.lower(), cache, label)
+                fetched = True
+    return fetched
+
+
 def load_graph(
     manifest: Manifest,
     layout: BuildLayout,
     toolchain: Toolchain,
     refresh: bool = False,
     update: Sequence[str] | None = None,
+    simulator: bool = False,
 ) -> PackageGraph:
     if not manifest.dependencies:
         if update is not None:
@@ -774,7 +974,7 @@ def load_graph(
 
     dependencies = [(d, dependency_path(d, layout.project)) for d in manifest.dependencies]
     lock = project_lock(layout)
-    key = _graph_key(dependencies, toolchain, manifest.deployment_target, lock)
+    key = _graph_key(dependencies, toolchain, manifest.deployment_target, lock, simulator)
     cache = graph_path(layout)
     cached = None if refresh or update is not None else _cached_graph(cache, key)
     if cached is not None:
@@ -792,10 +992,14 @@ def load_graph(
     _seed_lock(lock, root / LOCK_FILE)
     env = msvc.environment()
 
+    shared = shared_cache()
+    roots = [p for _, p in dependencies if p is not None]
     if update is None:
-        swiftpm.resolve(toolchain, root, state, env)
+        _with_artifacts(toolchain, state, env, shared, roots, lambda: swiftpm.resolve(toolchain, root, state, env, shared))
     else:
-        swiftpm.update(toolchain, root, state, env, identities)
+        _with_artifacts(
+            toolchain, state, env, shared, roots, lambda: swiftpm.update(toolchain, root, state, env, identities, shared)
+        )
     _publish_lock(root / LOCK_FILE, lock)
 
     with Heartbeat("reading swift packages"):
@@ -805,12 +1009,14 @@ def load_graph(
         descriptions = {}
         manifests = {}
         for identity, node in flat.items():
-            descriptions[identity] = swiftpm.describe(toolchain, node.path, state, env)
+            descriptions[identity] = _describe(toolchain, identity, node.path, state, env)
             manifests[identity] = swiftpm.dump_package(toolchain, node.path, state, env)
 
-    graph = build_graph(dependencies, tree, descriptions, manifests, manifest.deployment_target)
+    graph = build_graph(
+        dependencies, tree, descriptions, manifests, manifest.deployment_target, shared, simulator
+    )
     # rekey after resolve
-    key = _graph_key(dependencies, toolchain, manifest.deployment_target, lock)
+    key = _graph_key(dependencies, toolchain, manifest.deployment_target, lock, simulator)
     text = json.dumps(_serialize(graph, key), indent=2, sort_keys=True) + "\n"
     write_atomic(cache, text.encode("utf-8"))
     get_reporter().detail(f"package graph has {len(graph.targets)} targets")
@@ -834,10 +1040,37 @@ def derived_sources(target: PackageTarget, layout: BuildLayout) -> dict[Path, Ca
     return derived
 
 
+# header folders and module maps of C family targets, for the swift that imports them
+def clang_search(targets: Iterable[PackageTarget], layout: BuildLayout) -> tuple[list[Path], list[str]]:
+    includes: list[Path] = []
+    flags: list[str] = []
+    for target in targets:
+        settings = target.clang
+        if settings is None or settings.include_dir is None:
+            continue
+        includes.append(settings.include_dir)
+        if settings.module_map is not None:
+            module_map: Path | None = settings.module_map
+        elif settings.map_text is not None:
+            module_map = derived_dir(layout, target.module) / package_clang.MODULE_MAP_NAME
+        else:
+            module_map = None
+        if module_map is not None:
+            flags.extend(["-Xcc", f"-fmodule-map-file={module_map}"])
+    return includes, flags
+
+
 def compile_spec(
-    target: PackageTarget, layout: BuildLayout, sdk_root: Path, deployment_target: str
+    target: PackageTarget,
+    layout: BuildLayout,
+    sdk_root: Path,
+    deployment_target: str,
+    graph: PackageGraph,
+    simulator: bool = False,
 ) -> CompileSpec:
     modules = module_dir(layout)
+    binaries = graph.reachable_binaries(target)
+    clang_includes, clang_flags = clang_search(graph.reachable_targets(target), layout)
     return CompileSpec(
         sources=[*target.sources, *derived_sources(target, layout)],
         output=object_path(layout, target.module),
@@ -850,8 +1083,97 @@ def compile_spec(
         defines=[*PACKAGE_DEFINES, *target.defines],
         upcoming_features=list(target.upcoming_features),
         experimental_features=list(target.experimental_features),
-        include_dirs=[modules],
+        include_dirs=[modules, *clang_includes, *xcframework.include_dirs(binaries)],
+        framework_dirs=xcframework.framework_dirs(binaries),
+        extra_flags=[*clang_flags, *xcframework.module_map_flags(binaries)],
         emit_module=modules / f"{target.module}.swiftmodule",
+        simulator=simulator,
+    )
+
+
+def _depfile_headers(depfiles: Iterable[Path]) -> list[Path]:
+    found: list[Path] = []
+    for depfile in depfiles:
+        try:
+            found.extend(clang.parse_depfile(depfile.read_text(encoding="utf-8")))
+        except OSError:
+            continue
+    return found
+
+
+def clang_stage(
+    target: PackageTarget,
+    graph: PackageGraph,
+    layout: BuildLayout,
+    toolchain: Toolchain,
+    sdk_root: Path,
+    deployment_target: str,
+    simulator: bool,
+) -> Stage:
+    settings = target.clang
+    if settings is None:
+        raise PackageError(f"package {target.package} target {target.name} is not a C family target")
+    binaries = graph.reachable_binaries(target)
+    own_includes = [settings.include_dir] if settings.include_dir is not None else []
+    dependency_includes, _ = clang_search(graph.reachable_targets(target), layout)
+    includes = [*own_includes, *dependency_includes, *xcframework.include_dirs(binaries)]
+    specs = []
+    for source in target.sources:
+        language = clang.language_of(source) or ""
+        specs.append(
+            clang.ClangSpec(
+                source=source,
+                output=clang_object_path(layout, target, source),
+                depfile=clang_object_path(layout, target, source, ".d"),
+                sdk_root=sdk_root,
+                deployment_target=deployment_target,
+                language=language,
+                standard=settings.standard_for(language),
+                flags=settings.flags_for(language),
+                defines=list(CLANG_DEFINES),
+                include_dirs=includes,
+                framework_dirs=xcframework.framework_dirs(binaries),
+                simulator=simulator,
+            )
+        )
+    module_map = derived_dir(layout, target.module) / package_clang.MODULE_MAP_NAME
+    project = str(layout.project)
+    print_ = fingerprint(
+        {
+            "swift": toolchain.swift_version,
+            "target": target_triple("arm64", deployment_target, simulator),
+            "sdk": sdk_root.name,
+            "module": target.module,
+            "sources": [relative_key(p, layout.project) for p in target.sources],
+            "c_flags": [f.replace(project, "") for f in settings.c_flags],
+            "cxx_flags": [f.replace(project, "") for f in settings.cxx_flags],
+            "standards": [settings.c_standard, settings.cxx_standard],
+            "includes": [relative_key(p, layout.project) for p in includes],
+            "module_map": settings.map_text,
+            "binaries": xcframework.identity(binaries),
+        }
+    )
+    depfiles = [s.depfile for s in specs]
+    fixed = [
+        *target.sources,
+        *(package_clang.header_files(settings.include_dir) if settings.include_dir is not None else []),
+        *([settings.module_map] if settings.module_map is not None else []),
+        *(f for b in binaries for f in b.interface_files()),
+    ]
+
+    def run() -> None:
+        if settings.map_text is not None:
+            write_atomic(module_map, settings.map_text.encode("utf-8"))
+        with Heartbeat(f"compiling {target.module} from {target.package}"):
+            clang.compile_sources(toolchain, specs)
+
+    return Stage(
+        name=stage_name(target.module),
+        run=run,
+        fingerprint=print_,
+        depends_on=tuple(stage_name(m) for m in target.dependencies),
+        resolve_inputs=lambda: list(dict.fromkeys([*fixed, *_depfile_headers(depfiles)])),
+        outputs=(*(s.output for s in specs), *depfiles, *([module_map] if settings.map_text is not None else [])),
     )
 
 
@@ -861,16 +1183,22 @@ def package_stages(
     toolchain: Toolchain,
     sdk_root: Path,
     deployment_target: str,
+    simulator: bool = False,
 ) -> list[Stage]:
     stages = []
     for target in graph.targets:
-        spec = compile_spec(target, layout, sdk_root, deployment_target)
+        if target.clang is not None:
+            stages.append(clang_stage(target, graph, layout, toolchain, sdk_root, deployment_target, simulator))
+            continue
+        binaries = graph.reachable_binaries(target)
+        spec = compile_spec(target, layout, sdk_root, deployment_target, graph, simulator)
         derived = derived_sources(target, layout)
         embedded = [r.path for r in package_resources.embedded(target.resources)]
+        interfaces = [f for b in binaries for f in b.interface_files()]
         print_ = fingerprint(
             {
                 "swift": toolchain.swift_version,
-                "target": f"arm64-apple-ios{deployment_target}",
+                "target": target_triple("arm64", deployment_target, simulator),
                 "sdk": sdk_root.name,
                 "module": target.module,
                 "package_name": target.package_name,
@@ -881,6 +1209,7 @@ def package_stages(
                 "sources": [relative_key(p, layout.project) for p in target.sources],
                 "bundle": target.bundle,
                 "embedded": [relative_key(p, layout.project) for p in embedded],
+                "binaries": xcframework.identity(binaries),
                 "plugins": sorted((p.module, p.sha256) for p in toolchain.macro_plugins),
             }
         )
@@ -901,7 +1230,7 @@ def package_stages(
                 run=run,
                 fingerprint=print_,
                 depends_on=tuple(stage_name(m) for m in target.dependencies),
-                inputs=(*target.sources, *embedded),
+                inputs=(*target.sources, *embedded, *interfaces),
                 outputs=(spec.output, spec.emit_module, *derived),
             )
         )

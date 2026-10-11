@@ -13,12 +13,14 @@ class LinkSpec:
     deployment_target: str
     arch: str = "arm64"
     frameworks: list[str] = field(default_factory=list)
+    framework_dirs: list[Path] = field(default_factory=list)
     libraries: list[str] = field(default_factory=lambda: ["System", "objc"])
     # swift emits calls to builtins like ___isPlatformVersionAtLeast
     # nothing in the sdk defines them
     clang_rt: Path | None = None
     rpaths: list[str] = field(default_factory=list)
     extra_flags: list[str] = field(default_factory=list)
+    simulator: bool = False
 
 
 def build_link_argv(toolchain: Toolchain, spec: LinkSpec) -> list[str]:
@@ -27,7 +29,7 @@ def build_link_argv(toolchain: Toolchain, spec: LinkSpec) -> list[str]:
         "-arch",
         spec.arch,
         "-platform_version",
-        "ios",
+        "ios-simulator" if spec.simulator else "ios",
         spec.deployment_target,
         spec.deployment_target,
         "-syslibroot",
@@ -37,6 +39,8 @@ def build_link_argv(toolchain: Toolchain, spec: LinkSpec) -> list[str]:
     ]
     if spec.frameworks:
         argv.extend(["-F", str(spec.sdk_root / "System" / "Library" / "Frameworks")])
+    for directory in spec.framework_dirs:
+        argv.extend(["-F", str(directory)])
     for lib in spec.libraries:
         argv.append(lib if lib.startswith("-l") else f"-l{lib}")
     for fw in spec.frameworks:

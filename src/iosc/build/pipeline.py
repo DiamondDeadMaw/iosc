@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import re
 
-from iosc.build import assets, bundle, dsym, package, packages
+from iosc.build import assets, bundle, dsym, package, packages, xcframework
 from iosc.build import compile as build_compile
 from iosc.build import link as build_link
 from iosc.build import interfaces
@@ -91,19 +91,23 @@ def resolve_toolchain(settings: Settings | None = None) -> tuple[Toolchain, Path
     return discovery.detect(settings), paths.require(paths.sdk_root())
 
 
-def plan_build(project: Project, toolchain: Toolchain, sdk_root: Path) -> list[Stage]:
+def plan_build(
+    project: Project, toolchain: Toolchain, sdk_root: Path, simulator: bool = False
+) -> list[Stage]:
     manifest, layout, product = project.manifest, project.layout, project.product
     partial = bundle.partial_plist_path(layout)
     executable = build_link.executable_path(layout, product)
-    graph = packages.load_graph(manifest, layout, toolchain)
+    graph = packages.load_graph(manifest, layout, toolchain, simulator=simulator)
     return [
         *packages.package_stages(
-            graph, layout, toolchain, sdk_root, manifest.deployment_target
+            graph, layout, toolchain, sdk_root, manifest.deployment_target, simulator
         ),
         build_compile.compile_stage(
-            manifest, layout, toolchain, sdk_root, product, graph
+            manifest, layout, toolchain, sdk_root, product, graph, simulator
         ),
-        build_link.link_stage(manifest, layout, toolchain, sdk_root, product, graph),
+        build_link.link_stage(
+            manifest, layout, toolchain, sdk_root, product, graph, simulator
+        ),
         dsym.dsym_stage(
             layout, executable, product, depends_on=(build_link.STAGE_NAME,)
         ),
@@ -124,6 +128,7 @@ def plan_build(project: Project, toolchain: Toolchain, sdk_root: Path) -> list[S
             ),
             nested=packages.resource_bundles(graph, layout),
             swift_library_dirs=paths.swift_backdeploy_dirs(),
+            frameworks=xcframework.embedded_frameworks(graph.binaries),
         ),
     ]
 
@@ -132,10 +137,11 @@ def build(
     project_dir: Path | str,
     force: bool = False,
     settings: Settings | None = None,
+    simulator: bool = False,
 ) -> BuildResult:
     project = open_project(project_dir)
     toolchain, sdk_root = resolve_toolchain(settings)
-    stages = plan_build(project, toolchain, sdk_root)
+    stages = plan_build(project, toolchain, sdk_root, simulator)
 
     report = execute(
         stages, project.layout, toolchain_identity(toolchain, sdk_root), force=force
@@ -295,11 +301,12 @@ def sign(
     udid: str | None = None,
     force: bool = False,
     settings: Settings | None = None,
+    simulator: bool = False,
 ) -> SignResult:
     project = open_project(project_dir)
     toolchain, sdk_root = resolve_toolchain(settings)
 
-    stages = plan_build(project, toolchain, sdk_root)
+    stages = plan_build(project, toolchain, sdk_root, simulator)
     stages.append(
         sign_stage(project, identity, profile, udid, depends_on=(bundle.STAGE_NAME,))
     )
@@ -323,6 +330,7 @@ class DependencyReport:
     # pinned packages pulled in by other packages
     indirect: dict[str, str]
     targets: tuple[packages.PackageTarget, ...]
+    binaries: tuple[xcframework.Binary, ...] = ()
 
 
 def _dependency_report(project: Project, graph: packages.PackageGraph) -> DependencyReport:
@@ -333,6 +341,7 @@ def _dependency_report(project: Project, graph: packages.PackageGraph) -> Depend
         dependencies=tuple(statuses),
         indirect={k: v for k, v in sorted(pins.items()) if k not in direct},
         targets=graph.targets,
+        binaries=graph.binaries,
     )
 
 

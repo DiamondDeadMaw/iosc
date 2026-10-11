@@ -24,10 +24,21 @@ def _report_json(report: DependencyReport) -> dict[str, object]:
             {
                 "module": t.module,
                 "package": t.package,
-                "swift_version": t.swift_version,
+                "swift_version": t.swift_version or None,
+                "language": "c" if t.clang else "swift",
                 "bundle": t.bundle,
             }
             for t in report.targets
+        ],
+        "binaries": [
+            {
+                "name": b.name,
+                "package": b.package,
+                "slice": b.identifier,
+                "kind": b.kind,
+                "dynamic": b.dynamic,
+            }
+            for b in report.binaries
         ],
     }
 
@@ -52,7 +63,14 @@ def _print_report(report: DependencyReport) -> None:
     logging.info(paint(f"{len(report.targets)} modules", BOLD, CYAN))
     for target in report.targets:
         bundle = f", resources in {target.bundle}" if target.bundle else ""
-        logging.info(f"  {target.module}  from {target.package}, Swift {target.swift_version}{bundle}")
+        language = "C family" if target.clang else f"Swift {target.swift_version}"
+        logging.info(f"  {target.module}  from {target.package}, {language}{bundle}")
+    if report.binaries:
+        logging.info("")
+        logging.info(paint(f"{len(report.binaries)} prebuilt binaries", BOLD, CYAN))
+        for binary in report.binaries:
+            linkage = "dynamic, embedded" if binary.dynamic else "static"
+            logging.info(f"  {binary.name}  from {binary.package}, slice {binary.identifier}, {binary.kind} {linkage}")
 
 
 def _finish(args, report: DependencyReport, message: str) -> None:

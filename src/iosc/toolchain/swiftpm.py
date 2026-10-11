@@ -14,7 +14,11 @@ def swift_driver(toolchain: Toolchain) -> Path:
 
 # scratch keeps swiftpm state out of the users checkout
 def package_argv(
-    toolchain: Toolchain, package_dir: Path, scratch: Path, subcommand: list[str]
+    toolchain: Toolchain,
+    package_dir: Path,
+    scratch: Path,
+    subcommand: list[str],
+    cache: Path | None = None,
 ) -> list[str]:
     return [
         str(swift_driver(toolchain)),
@@ -23,6 +27,7 @@ def package_argv(
         str(package_dir),
         "--scratch-path",
         str(scratch),
+        *(["--cache-path", str(cache)] if cache is not None else []),
         *subcommand,
     ]
 
@@ -58,6 +63,7 @@ def _stream(
     scratch: Path,
     env: dict[str, str],
     subcommand: list[str],
+    cache: Path | None = None,
 ) -> None:
     reporter = get_reporter()
 
@@ -65,7 +71,7 @@ def _stream(
         if line.strip():
             reporter.info(line.rstrip())
 
-    argv = package_argv(toolchain, package_dir, scratch, subcommand)
+    argv = package_argv(toolchain, package_dir, scratch, subcommand, cache)
     try:
         process.run_streaming(argv, relay, env=env, merge_stderr=True)
     except ExternalToolError as err:
@@ -74,9 +80,13 @@ def _stream(
 
 
 def resolve(
-    toolchain: Toolchain, package_dir: Path, scratch: Path, env: dict[str, str]
+    toolchain: Toolchain,
+    package_dir: Path,
+    scratch: Path,
+    env: dict[str, str],
+    cache: Path | None = None,
 ) -> None:
-    _stream(toolchain, package_dir, scratch, env, ["resolve"])
+    _stream(toolchain, package_dir, scratch, env, ["resolve"], cache)
 
 
 # empty identities updates every package
@@ -86,8 +96,9 @@ def update(
     scratch: Path,
     env: dict[str, str],
     identities: list[str],
+    cache: Path | None = None,
 ) -> None:
-    _stream(toolchain, package_dir, scratch, env, ["update", *identities])
+    _stream(toolchain, package_dir, scratch, env, ["update", *identities], cache)
 
 
 def show_dependencies(

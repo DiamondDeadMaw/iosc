@@ -6,7 +6,7 @@ import shutil
 from typing import Any
 
 from iosc.build.graph import BuildLayout, Stage, fingerprint, relative_key
-from iosc.build.swift_libraries import embed_swift_libraries
+from iosc.build.swift_libraries import FRAMEWORKS_DIR, embed_swift_libraries
 from iosc.config.manifest import Manifest
 from iosc.core import BundleError, rmtree_force
 from iosc.core.errors import MachOError
@@ -14,6 +14,7 @@ from iosc.formats import macho
 from iosc.formats.plist import read_plist, write_plist
 
 STAGE_NAME = "bundle"
+BUILD_ONLY_DIRS = ("Headers", "PrivateHeaders", "Modules")
 PKG_INFO = b"APPL????"
 PARTIAL_PLIST_NAME = "assets-partial.plist"
 
@@ -153,6 +154,16 @@ def _copy_tree_into(source: Path, dest: Path) -> None:
         shutil.copyfile(item, target)
 
 
+# headers and swift modules are build time only
+def _copy_framework(source: Path, dest: Path) -> None:
+    for item in sorted(source.rglob("*")):
+        relative = item.relative_to(source)
+        if item.is_file() and relative.parts[0] not in BUILD_ONLY_DIRS:
+            target = dest / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(item, target)
+
+
 def assemble(
     manifest: Manifest,
     layout: BuildLayout,
@@ -160,6 +171,7 @@ def assemble(
     product: str,
     nested: Sequence[Path] = (),
     swift_library_dirs: Sequence[Path] = (),
+    frameworks: Sequence[Path] = (),
 ) -> Path:
     read_macho_arch(executable)
     info = build_info_plist(
@@ -189,6 +201,10 @@ def assemble(
         if not directory.is_dir():
             raise BundleError(f"resource bundle {directory} was not built")
         _copy_tree_into(directory, staging_app / directory.name)
+
+    # dynamic binary frameworks, signed with the app by the sign stage
+    for framework in frameworks:
+        _copy_framework(framework, staging_app / FRAMEWORKS_DIR / framework.name)
 
     # swap in only after the whole tree is assembled
     rmtree_force(layout.app)
@@ -241,6 +257,7 @@ def bundle_stage(
     depends_on: Sequence[str] = (),
     nested: Sequence[Path] = (),
     swift_library_dirs: Sequence[Path] = (),
+    frameworks: Sequence[Path] = (),
 ) -> Stage:
     resources = collect_resources(manifest, layout.project)
 
@@ -252,18 +269,19 @@ def bundle_stage(
             "resources": [relative_key(p, layout.project) for p in resources],
             "nested": [relative_key(p, layout.project) for p in nested],
             "swift_library_dirs": [str(p) for p in swift_library_dirs],
+            "frameworks": [relative_key(p, layout.project) for p in frameworks],
         }
     )
 
     def run() -> None:
-        assemble(manifest, layout, executable, product, nested, swift_library_dirs)
+        assemble(manifest, layout, executable, product, nested, swift_library_dirs, frameworks)
 
     return Stage(
         name=STAGE_NAME,
         run=run,
         fingerprint=print_,
         depends_on=tuple(depends_on),
-        inputs=(executable, *resources),
+        inputs=(executable, *resources, *(f for d in frameworks for f in sorted(d.rglob("*")) if f.is_file())),
         # executable is deliberately not an output. sign rewrites it in place
         outputs=(layout.app / "Info.plist", layout.app / "PkgInfo"),
     )

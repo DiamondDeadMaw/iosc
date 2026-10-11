@@ -21,7 +21,13 @@ class CompileSpec:
     upcoming_features: list[str] = field(default_factory=list)
     experimental_features: list[str] = field(default_factory=list)
     include_dirs: list[Path] = field(default_factory=list)
+    framework_dirs: list[Path] = field(default_factory=list)
     emit_module: Path | None = None
+    simulator: bool = False
+
+
+def target_triple(arch: str, deployment_target: str, simulator: bool = False) -> str:
+    return f"{arch}-apple-ios{deployment_target}{'-simulator' if simulator else ''}"
 
 
 def _module_flags(spec: CompileSpec) -> list[str]:
@@ -42,6 +48,8 @@ def _module_flags(spec: CompileSpec) -> list[str]:
         argv.extend(["-enable-experimental-feature", feature])
     for include in spec.include_dirs:
         argv.extend(["-I", str(include)])
+    for directory in spec.framework_dirs:
+        argv.extend(["-F", str(directory)])
     if spec.emit_module is not None:
         argv.extend(["-emit-module", "-emit-module-path", str(spec.emit_module)])
     return argv
@@ -52,7 +60,7 @@ def build_compile_argv(toolchain: Toolchain, spec: CompileSpec) -> list[str]:
         str(toolchain.swiftc),
         "-c",
         "-target",
-        f"{spec.arch}-apple-ios{spec.deployment_target}",
+        target_triple(spec.arch, spec.deployment_target, spec.simulator),
         "-sdk",
         str(spec.sdk_root),
         "-g",
