@@ -9,6 +9,10 @@ requires-python = ">=3.11"
 # Pair record generation needs RSA keygen and X.509, not worth hand rolling
 dependencies = ["cryptography>=42"]
 
+[project.optional-dependencies]
+# installs over wifi on ios 17+, the tunnel also needs python 3.13
+wifi = ["pymobiledevice3>=11.49"]
+
 [project.scripts]
 iosc = "iosc.cli.main:main"
 

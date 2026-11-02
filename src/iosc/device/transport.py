@@ -1,12 +1,16 @@
+import os
 import plistlib
 import socket
 import struct
+import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
+from iosc.core import write_atomic
 from iosc.core.errors import DeviceError
 
-# Apple Mobile Device Service, installed with iTunes or the Apple Devices app
+# usbmux listener on windows, apple mobile device service
 USBMUX_HOST = "127.0.0.1"
 USBMUX_PORT = 27015
 
@@ -32,7 +36,7 @@ RESULT_NAMES = {
     RESULT_CONNREFUSED: "connection refused by device",
 }
 
-# big endian length then an xml plist, lockdown and installation proxy
+# big endian length then xml plist. lockdown and installation proxy
 FRAME_LENGTH = struct.Struct(">I")
 
 
@@ -48,6 +52,8 @@ class DeviceInfo:
     serial: str
     connection_type: str
     properties: dict[str, Any] = field(default_factory=dict)
+    # set for network discovery, not usbmux
+    address: str | None = None
 
     @property
     def udid(self) -> str:
@@ -58,7 +64,10 @@ def recv_exact(sock: socket.socket, count: int, what: str = "connection") -> byt
     chunks: list[bytes] = []
     remaining = count
     while remaining > 0:
-        chunk = sock.recv(remaining)
+        try:
+            chunk = sock.recv(remaining)
+        except TimeoutError as error:
+            raise DeviceError(f"{what} timed out while reading") from error
         if not chunk:
             raise DeviceError(f"{what} closed while reading")
         chunks.append(chunk)
@@ -66,7 +75,6 @@ def recv_exact(sock: socket.socket, count: int, what: str = "connection") -> byt
     return b"".join(chunks)
 
 
-# length prefixed plist framing shared by every lockdown style service
 class PlistConnection:
     def __init__(self, sock: socket.socket, what: str = "service") -> None:
         self.socket: socket.socket | None = sock
@@ -229,7 +237,7 @@ class UsbmuxClient:
             payload["DeviceID"] = device_id
         self._request(payload)
 
-    # PortNumber travels in network byte order although the header is little endian
+    # PortNumber is big endian, unlike the header
     def connect_device(self, device_id: int, port: int) -> socket.socket:
         network_port = struct.unpack("<H", struct.pack(">H", port))[0]
         response = self._request(
@@ -263,3 +271,122 @@ def connect_device(
 ) -> socket.socket:
     client = UsbmuxClient(host, mux_port).connect()
     return client.connect_device(device_id, port)
+
+
+class Connector(Protocol):
+    # pairing needs the trust dialog. only usb shows it
+    can_pair: bool
+
+    def connect(self, port: int) -> socket.socket: ...
+
+
+class UsbmuxConnector:
+    can_pair = True
+
+    def __init__(
+        self, device_id: int, host: str = USBMUX_HOST, mux_port: int = USBMUX_PORT
+    ) -> None:
+        self.device_id = device_id
+        self.host = host
+        self.mux_port = mux_port
+
+    def connect(self, port: int) -> socket.socket:
+        return connect_device(self.device_id, port, host=self.host, mux_port=self.mux_port)
+
+
+class NetworkConnector:
+    can_pair = False
+
+    # io timeout outlasts the slowest installation_proxy step
+    def __init__(self, address: str, timeout: float = 10.0, io_timeout: float = 120.0) -> None:
+        self.address = address
+        self.timeout = timeout
+        self.io_timeout = io_timeout
+
+    def connect(self, port: int) -> socket.socket:
+        try:
+            sock = socket.create_connection((self.address, port), timeout=self.timeout)
+        except OSError as error:
+            raise DeviceError(f"cannot reach {self.address}:{port} ({error})") from error
+        sock.settimeout(self.io_timeout)
+        return sock
+
+
+def connector_for(info: DeviceInfo) -> Connector:
+    if info.address:
+        return NetworkConnector(info.address)
+    return UsbmuxConnector(info.device_id)
+
+
+class PairRecords(Protocol):
+    def buid(self) -> str: ...
+
+    def udids(self) -> list[str]: ...
+
+    def read(self, udid: str) -> dict[str, Any] | None: ...
+
+    def save(self, udid: str, record: dict[str, Any], device_id: int | None = None) -> None: ...
+
+
+class UsbmuxPairRecords:
+    def __init__(self, host: str = USBMUX_HOST, port: int = USBMUX_PORT) -> None:
+        self.host = host
+        self.port = port
+
+    def buid(self) -> str:
+        with UsbmuxClient(self.host, self.port) as client:
+            return client.read_buid()
+
+    def udids(self) -> list[str]:
+        with UsbmuxClient(self.host, self.port) as client:
+            return sorted({d.serial for d in client.list_devices() if d.serial})
+
+    def read(self, udid: str) -> dict[str, Any] | None:
+        with UsbmuxClient(self.host, self.port) as client:
+            return client.read_pair_record(udid)
+
+    def save(self, udid: str, record: dict[str, Any], device_id: int | None = None) -> None:
+        with UsbmuxClient(self.host, self.port) as client:
+            client.save_pair_record(udid, record, device_id=device_id)
+
+
+# <udid>.plist per device, same as usbmuxd
+class FilePairRecords:
+    BUID_FILE = "SystemConfiguration.plist"
+
+    def __init__(self, directory: Path | str) -> None:
+        self.directory = Path(directory)
+
+    def buid(self) -> str:
+        path = self.directory / self.BUID_FILE
+        if path.is_file():
+            value = plistlib.loads(path.read_bytes()).get("SystemBUID")
+            if value:
+                return value
+        value = str(uuid.uuid4()).upper()
+        self._write(path, {"SystemBUID": value})
+        return value
+
+    def udids(self) -> list[str]:
+        if not self.directory.is_dir():
+            return []
+        return sorted(
+            p.stem for p in self.directory.glob("*.plist") if p.name != self.BUID_FILE
+        )
+
+    def read(self, udid: str) -> dict[str, Any] | None:
+        path = self.directory / f"{udid}.plist"
+        if not path.is_file():
+            return None
+        return plistlib.loads(path.read_bytes())
+
+    def save(self, udid: str, record: dict[str, Any], device_id: int | None = None) -> None:
+        self._write(self.directory / f"{udid}.plist", record)
+
+    def _write(self, path: Path, payload: dict[str, Any]) -> None:
+        self.directory.mkdir(parents=True, exist_ok=True)
+        write_atomic(path, plistlib.dumps(payload, fmt=plistlib.FMT_XML))
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass

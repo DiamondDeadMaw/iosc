@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from iosc.core.errors import DeviceError
 from iosc.device import transport
-from iosc.device.transport import DeviceInfo, PlistConnection
+from iosc.device.transport import Connector, DeviceInfo, PairRecords, PlistConnection
 
 LOCKDOWN_PORT = 62078
 LOCKDOWN_TYPE = "com.apple.mobile.lockdown"
@@ -44,12 +44,12 @@ class LockdownClient:
     def __init__(
         self,
         device: DeviceInfo,
-        host: str = transport.USBMUX_HOST,
-        mux_port: int = transport.USBMUX_PORT,
+        connector: Connector | None = None,
+        records: PairRecords | None = None,
     ) -> None:
         self.device = device
-        self.host = host
-        self.mux_port = mux_port
+        self.connector = connector or transport.connector_for(device)
+        self.records = records or transport.UsbmuxPairRecords()
         self.connection: PlistConnection | None = None
         self.session_id: str | None = None
         self.pair_record: dict[str, Any] | None = None
@@ -58,12 +58,7 @@ class LockdownClient:
     def connect(self) -> "LockdownClient":
         if self.connection is not None:
             return self
-        sock = transport.connect_device(
-            self.device.device_id,
-            LOCKDOWN_PORT,
-            host=self.host,
-            mux_port=self.mux_port,
-        )
+        sock = self.connector.connect(LOCKDOWN_PORT)
         self.connection = PlistConnection(sock, "lockdown")
         kind = self.query_type()
         if kind != LOCKDOWN_TYPE:
@@ -118,19 +113,20 @@ class LockdownClient:
     def device_public_key(self) -> bytes:
         return bytes(self.get_value("DevicePublicKey"))
 
+    def set_value(self, key: str, value: Any, domain: str | None = None) -> None:
+        payload: dict[str, Any] = {"Request": "SetValue", "Key": key, "Value": value}
+        if domain is not None:
+            payload["Domain"] = domain
+        self._request(payload)
+
     def system_buid(self) -> str:
-        with transport.UsbmuxClient(self.host, self.mux_port) as client:
-            return client.read_buid()
+        return self.records.buid()
 
     def load_saved_pair_record(self) -> dict[str, Any] | None:
-        with transport.UsbmuxClient(self.host, self.mux_port) as client:
-            return client.read_pair_record(self.udid())
+        return self.records.read(self.udid())
 
     def save_pair_record(self, record: dict[str, Any]) -> None:
-        with transport.UsbmuxClient(self.host, self.mux_port) as client:
-            client.save_pair_record(
-                self.udid(), record, device_id=self.device.device_id
-            )
+        self.records.save(self.udid(), record, device_id=self.device.device_id)
 
     def generate_pair_record(self) -> dict[str, Any]:
         device_key = serialization.load_pem_public_key(self.device_public_key())
@@ -213,9 +209,7 @@ class LockdownClient:
 
     def open_service(self, name: str) -> socket.socket:
         port, use_ssl = self.start_service(name)
-        sock = transport.connect_device(
-            self.device.device_id, port, host=self.host, mux_port=self.mux_port
-        )
+        sock = self.connector.connect(port)
         if use_ssl:
             if self.pair_record is None:
                 raise SessionInactive("service requires TLS but no pair record is loaded")
@@ -234,8 +228,8 @@ class LockdownClient:
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
         context.minimum_version = ssl.TLSVersion.TLSv1
-        # pair certs use rsa with weak digests, relax the security level
-        # the pairing already authenticates this channel
+        # pair certs use weak rsa digests
+        # pairing already authenticates this channel
         try:
             context.set_ciphers("DEFAULT@SECLEVEL=0")
         except ssl.SSLError:

@@ -1,8 +1,7 @@
 from iosc.build import pipeline
-from iosc.cli.args import project_dir
+from iosc.cli.args import device_from_args, project_dir
 from iosc.core import logging
 from iosc.core.errors import InstallError
-from iosc.device import Device, find_device
 
 
 def bundle_to_install(project) -> str:
@@ -22,7 +21,7 @@ def report_progress(percent: int, status: str) -> None:
 def run(args) -> None:
     project = pipeline.open_project(project_dir(args))
     target = bundle_to_install(project)
-    device = Device(find_device(args.udid))
+    device = device_from_args(args)
 
     logging.step(f"installing {target} on {device.udid}")
     result = device.install_app(target, progress=report_progress)
