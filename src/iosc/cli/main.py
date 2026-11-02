@@ -15,11 +15,13 @@ from iosc.cli.commands import (
     launch as launch_cmd,
     log as log_cmd,
     package as package_cmd,
+    resign as resign_cmd,
     run as run_cmd,
     sdk as sdk_cmd,
     sign as sign_cmd,
     sim as sim_cmd,
     toolchain as toolchain_cmd,
+    wifi as wifi_cmd,
 )
 from iosc.config.manifest import REQUIREMENT_KINDS
 from iosc.core import logging
@@ -55,7 +57,7 @@ def add_sim_boot_arguments(parser: argparse.ArgumentParser) -> None:
 
 def add_sim_launch_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--env", action="append", default=[])
-    # everything after the separator goes to the app straight
+    # args after separator go to the app
     parser.add_argument("app_args", nargs=argparse.REMAINDER, default=[])
 
 
@@ -68,7 +70,7 @@ def add_sim_parser(subparsers, common: argparse.ArgumentParser) -> None:
 
     sim_boot = sim_subparsers.add_parser("boot", parents=[common])
     add_sim_boot_arguments(sim_boot)
-    # everything after the separator goes to the sim
+    # args after separator go to the sim
     sim_boot.add_argument("iossim_args", nargs=argparse.REMAINDER, default=[])
 
     sim_run = sim_subparsers.add_parser("run", parents=[common])
@@ -149,6 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     auth_apk_extract = auth_subparsers.add_parser("apk-extract", parents=[common])
     auth_apk_extract.add_argument("apkm", nargs="?", default=None)
+    auth_apk_extract.add_argument(
+        "--abi", choices=("x86_64", "arm64-v8a"), default=None
+    )
     auth_apk_extract.set_defaults(handler=auth_cmd.run)
 
     toolchain_parser = subparsers.add_parser("toolchain", parents=[common])
@@ -194,11 +199,29 @@ def build_parser() -> argparse.ArgumentParser:
     deps_add.set_defaults(handler=deps_cmd.run)
 
     devices_parser = subparsers.add_parser("devices", parents=[common])
+    devices_parser.add_argument("--wifi", action="store_true")
     devices_parser.set_defaults(handler=devices_cmd.run)
 
     install_parser = subparsers.add_parser("install", parents=[common])
     install_parser.add_argument("--udid", default=None)
+    install_parser.add_argument("--wifi", action="store_true")
     install_parser.set_defaults(handler=install_cmd.run)
+
+    resign_parser = subparsers.add_parser("resign", parents=[common])
+    resign_parser.add_argument("source")
+    resign_parser.add_argument("--output", "-o", default=None)
+    resign_parser.add_argument("--apple-id", dest="apple_id", required=True)
+    resign_parser.add_argument("--team-id", dest="team_id", default=None)
+    resign_parser.add_argument("--bundle-id", dest="bundle_id", default=None)
+    resign_parser.add_argument("--udid", default=None)
+    resign_parser.add_argument("--install", action="store_true")
+    resign_parser.add_argument("--wifi", action="store_true")
+    resign_parser.set_defaults(handler=resign_cmd.run)
+
+    wifi_parser = subparsers.add_parser("wifi", parents=[common])
+    wifi_parser.add_argument("subcommand", choices=("enable", "disable", "status", "pair"))
+    wifi_parser.add_argument("--udid", default=None)
+    wifi_parser.set_defaults(handler=wifi_cmd.run)
 
     launch_parser = subparsers.add_parser("launch", parents=[common])
     launch_parser.add_argument("--udid", default=None)
@@ -207,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-kill-existing", dest="no_kill_existing", action="store_true"
     )
     launch_parser.add_argument("--suspended", action="store_true")
-    # everything after -- goes to the app untouched, e.g. iosc launch -- --flag value
+    # args after separator go to the app untouched
     launch_parser.add_argument("app_args", nargs=argparse.REMAINDER, default=[])
     launch_parser.set_defaults(handler=launch_cmd.run)
 

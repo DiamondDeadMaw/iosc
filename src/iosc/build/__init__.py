@@ -10,8 +10,11 @@ from iosc.build.pipeline import (
     package_ipa,
     sign,
 )
+from iosc.build.resign import ResignResult, resign_app
 
 __all__ = [
+    "ResignResult",
+    "resign_app",
     "BuildLayout",
     "BuildReport",
     "BuildResult",
