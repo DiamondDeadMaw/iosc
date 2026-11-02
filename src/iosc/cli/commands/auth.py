@@ -34,7 +34,7 @@ def run_status(args) -> None:
 
 
 def run_apk_extract(args) -> None:
-    extracted = extract_adi_libraries(apk_path=args.apkm)
+    extracted = extract_adi_libraries(apk_path=args.apkm, abi=args.abi)
     if args.json:
         logging.result({"extracted": [str(p) for p in extracted]})
         return

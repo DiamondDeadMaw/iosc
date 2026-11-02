@@ -28,15 +28,16 @@ if sys.platform == "win32":
 DEFAULT_DSID = 0xFFFFFFFFFFFFFFFE
 
 
-def bind_adi_native(dll_path: Path | str | None = None) -> ctypes.WinDLL:
+# 64 bit hosts have one c calling convention
+def bind_adi_native(dll_path: Path | str | None = None) -> ctypes.CDLL:
     if dll_path is None:
         path = require(adi_bridge())
     else:
         path = Path(dll_path)
         if not path.is_file():
-            raise AnisetteError(f"Native bridge DLL not found at {path}")
+            raise AnisetteError(f"Native bridge library not found at {path}")
 
-    bridge = ctypes.WinDLL(str(path))
+    bridge = ctypes.CDLL(str(path))
 
     bridge.adi_init.argtypes = [ctypes.c_char_p]
     bridge.adi_init.restype = ctypes.c_int
@@ -202,11 +203,11 @@ class LocalADIProvider:
             if not self.vendor_dir.is_dir():
                 raise AnisetteError(f"ADI vendor directory not found: {self.vendor_dir}")
             if not self.dll_path.is_file():
-                raise AnisetteError(f"Native bridge DLL not found: {self.dll_path}")
+                raise AnisetteError(f"Native bridge library not found: {self.dll_path}")
             try:
                 self.bridge = bind_adi_native(self.dll_path)
             except Exception as exc:
-                raise AnisetteError(f"Failed to load native bridge DLL {self.dll_path}: {exc}") from exc
+                raise AnisetteError(f"Failed to load native bridge {self.dll_path}: {exc}") from exc
 
         vendor_bytes = str(self.vendor_dir).encode("utf-8")
         rc_init = self.bridge.adi_init(vendor_bytes)

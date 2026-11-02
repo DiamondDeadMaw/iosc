@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import platform
 import re
 import sys
 
@@ -22,10 +23,8 @@ def _resolve_external_root() -> tuple[Path, str]:
     override = os.environ.get("IOSC_EXTERNAL")
     if override:
         return Path(override), "IOSC_EXTERNAL"
-    # a single-file exe has no source tree
-    # prefer an external dir beside the exe, fall back to user state.
-    # resolved once per process and always created up front so this
-    # cannot flip between the two across calls within a session
+    # single file exe has no source tree
+    # external beside exe, else user state
     if is_frozen():
         beside = Path(sys.executable).resolve().parent / "external"
         if beside.is_dir():
@@ -38,7 +37,7 @@ def _resolve_external_root() -> tuple[Path, str]:
     pkg_dir = Path(__file__).resolve().parent.parent
     if pkg_dir.parent.name == "src":
         return pkg_dir.parent.parent / "external", "source checkout"
-    # installed, not run from source. external lives beside user state
+    # installed build. external lives beside user state
     return state_dir() / "external", "user state"
 
 
@@ -54,10 +53,19 @@ def state_dir() -> Path:
     override = os.environ.get("IOSC_STATE")
     if override:
         return Path(override)
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "iosc"
-    return Path.home() / "AppData" / "Local" / "iosc"
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "iosc"
+        return Path.home() / "AppData" / "Local" / "iosc"
+    xdg_state = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg_state) if xdg_state else Path.home() / ".local" / "state"
+    return base / "iosc"
+
+
+# linux host over wifi has no usbmux daemon for pair records
+def pair_records_dir() -> Path:
+    return state_dir() / "lockdown"
 
 
 def cache_dir() -> Path:
@@ -76,7 +84,7 @@ def xcode_xip_dir() -> ExternalAsset:
     )
 
 
-# where the xip carve lands, mirroring the archive namespace
+# xip carve output, mirrors archive namespace
 def sdk_extract_root() -> ExternalAsset:
     return ExternalAsset(
         name="sdk_extract_root",
@@ -160,11 +168,29 @@ def apk_dir() -> ExternalAsset:
     )
 
 
-def adi_lib_dir() -> ExternalAsset:
+ANDROID_ABIS = {
+    "amd64": "x86_64",
+    "x86_64": "x86_64",
+    "aarch64": "arm64-v8a",
+    "arm64": "arm64-v8a",
+}
+
+
+# apple android libs run natively. must match host cpu
+def host_abi() -> str:
+    machine = platform.machine().lower()
+    abi = ANDROID_ABIS.get(machine)
+    if abi is None:
+        raise MissingExternalAsset(f"no Apple Music libraries exist for a {machine} host")
+    return abi
+
+
+def adi_lib_dir(abi: str | None = None) -> ExternalAsset:
+    abi = abi or host_abi()
     return ExternalAsset(
         name="adi_lib_dir",
-        path=external_root() / "apk" / "adi",
-        hint="Extract ADI libraries into external/apk/adi.",
+        path=external_root() / "apk" / "adi" / abi,
+        hint=f"Run 'iosc auth apk-extract' to extract the {abi} ADI libraries.",
     )
 
 
@@ -204,14 +230,20 @@ def llvm_symbolizer_tool() -> ExternalAsset:
 
 
 def adi_bridge() -> ExternalAsset:
+    if sys.platform == "win32":
+        return ExternalAsset(
+            name="adi_bridge",
+            path=vendor_adi_dir() / "adi_native.dll",
+            hint=(
+                "adi_native.dll ships inside iosc.exe and should already be here. "
+                "If you built iosc from source yourself, run packaging/build.ps1, "
+                "which compiles it from native/adi before packaging."
+            ),
+        )
     return ExternalAsset(
         name="adi_bridge",
-        path=vendor_adi_dir() / "adi_native.dll",
-        hint=(
-            "adi_native.dll ships inside iosc.exe and should already be here. "
-            "If you built iosc from source yourself, run packaging/build.ps1, "
-            "which compiles it from native/adi before packaging."
-        ),
+        path=vendor_adi_dir() / "libadi_native.so",
+        hint="Run native/adi/build.sh to build libadi_native.so into vendor/adi.",
     )
 
 
@@ -240,7 +272,7 @@ def exists(asset: ExternalAsset) -> bool:
 
 # ios compiler-rt from the user's extracted xcode
 # swift needs builtins like ___isPlatformVersionAtLeast that the sdk lacks
-# clang version dir floats, take the newest
+# clang version dir floats. take newest
 def clang_rt_ios() -> Path | None:
     return _clang_rt("libclang_rt.ios.a")
 
@@ -261,7 +293,7 @@ def _clang_rt(name: str) -> Path | None:
 
 
 # swift libs copied into apps deployed below their os
-# newest swift first, first match wins
+# newest swift first. first match wins
 def swift_backdeploy_dirs(platform: str = "iphoneos") -> list[Path]:
     lib_root = (
         external_root() / "xcode" / "Toolchains" / "XcodeDefault.xctoolchain" / "usr" / "lib"

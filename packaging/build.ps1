@@ -26,6 +26,7 @@ Write-Host "Compiling ADI native bridge"
 & $gxx.Source -shared -O2 -fno-exceptions -fno-asynchronous-unwind-tables `
     -o $adiDll `
     (Join-Path $root "native\adi\adi_native.cpp") (Join-Path $root "native\adi\elfloader.cpp") `
+    (Join-Path $root "native\adi\platform_win.cpp") `
     -static -static-libgcc -static-libstdc++
 if ($LASTEXITCODE -ne 0) { throw "ADI native bridge compile failed" }
 

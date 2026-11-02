@@ -5,8 +5,15 @@
 #include <cstddef>
 #include <string>
 #include <vector>
-#include <unordered_map>
-#include <windows.h>
+
+// apple libs use android abi. not native on windows
+#if defined(_WIN32)
+#define ADI_ABI __attribute__((sysv_abi))
+#define ADI_EXPORT extern "C" __declspec(dllexport)
+#else
+#define ADI_ABI
+#define ADI_EXPORT extern "C" __attribute__((visibility("default")))
+#endif
 
 // ELF64 standard types
 typedef uint64_t Elf64_Addr;
@@ -37,16 +44,11 @@ struct Elf64_Ehdr {
 
 #define ELFMAG "\177ELF"
 #define SELFMAG 4
-#define EI_MAG0 0
-#define EI_MAG1 1
-#define EI_MAG2 2
-#define EI_MAG3 3
 #define EI_CLASS 4
 #define ELFCLASS64 2
 #define EI_DATA 5
 #define ELFDATA2LSB 1
 #define ET_DYN 3
-#define EM_X86_64 62
 
 struct Elf64_Phdr {
     Elf64_Word  p_type;
@@ -89,34 +91,16 @@ struct Elf64_Dyn {
 #define DT_NULL 0
 #define DT_NEEDED 1
 #define DT_PLTRELSZ 2
-#define DT_PLTGOT 3
-#define DT_HASH 4
 #define DT_STRTAB 5
 #define DT_SYMTAB 6
 #define DT_RELA 7
 #define DT_RELASZ 8
-#define DT_RELAENT 9
 #define DT_STRSZ 10
-#define DT_SYMENT 11
 #define DT_INIT 12
-#define DT_FINI 13
 #define DT_SONAME 14
-#define DT_RPATH 15
-#define DT_SYMBOLIC 16
-#define DT_REL 17
-#define DT_RELSZ 18
-#define DT_RELENT 19
-#define DT_PLTREL 20
-#define DT_DEBUG 21
-#define DT_TEXTREL 22
 #define DT_JMPREL 23
 #define DT_INIT_ARRAY 25
-#define DT_FINI_ARRAY 26
 #define DT_INIT_ARRAYSZ 27
-#define DT_FINI_ARRAYSZ 28
-#define DT_RUNPATH 29
-#define DT_FLAGS 30
-#define DT_GNU_HASH 0x6ffffef5
 
 struct Elf64_Sym {
     Elf64_Word    st_name;
@@ -128,6 +112,7 @@ struct Elf64_Sym {
 };
 
 #define SHN_UNDEF 0
+#define SHT_DYNSYM 11
 
 struct Elf64_Rela {
     Elf64_Addr   r_offset;
@@ -138,39 +123,28 @@ struct Elf64_Rela {
 #define ELF64_R_SYM(i)    ((i) >> 32)
 #define ELF64_R_TYPE(i)   ((i) & 0xffffffffL)
 
-#define R_X86_64_NONE 0
-#define R_X86_64_64 1
-#define R_X86_64_GLOB_DAT 6
-#define R_X86_64_JUMP_SLOT 7
-#define R_X86_64_RELATIVE 8
-#define R_X86_64_IRELATIVE 37
-
-// Linux x86_64 struct stat (144 bytes)
-struct linux_stat64 {
-    uint64_t st_dev;
-    uint64_t st_ino;
-    uint64_t st_nlink;
-    uint32_t st_mode;
-    uint32_t st_uid;
-    uint32_t st_gid;
-    uint32_t __pad0;
-    uint64_t st_rdev;
-    int64_t  st_size;
-    int64_t  st_blksize;
-    int64_t  st_blocks;
-    int64_t  st_atime;
-    int64_t  st_atimensec;
-    int64_t  st_mtime;
-    int64_t  st_mtimensec;
-    int64_t  st_ctime;
-    int64_t  st_ctimensec;
-    int64_t  __unused[3];
-};
-
-struct linux_timeval {
-    int64_t tv_sec;
-    int64_t tv_usec;
-};
+// build arch picks the relocation set. libs match host cpu
+#if defined(__x86_64__)
+#define ELF_MACHINE 62
+#define ELF_MACHINE_NAME "x86_64"
+#define R_NONE 0
+#define R_ABS64 1
+#define R_GLOB_DAT 6
+#define R_JUMP_SLOT 7
+#define R_RELATIVE 8
+#define R_IRELATIVE 37
+#elif defined(__aarch64__)
+#define ELF_MACHINE 183
+#define ELF_MACHINE_NAME "aarch64"
+#define R_NONE 0
+#define R_ABS64 257
+#define R_GLOB_DAT 1025
+#define R_JUMP_SLOT 1026
+#define R_RELATIVE 1027
+#define R_IRELATIVE 1032
+#else
+#error "the ADI loader supports x86_64 and aarch64 hosts only"
+#endif
 
 class ElfSharedObject {
 public:
@@ -217,15 +191,33 @@ private:
     void* resolve_symbol(const char* sym_name);
 };
 
-// Shims lookup
+struct ShimEntry {
+    const char* name;
+    void* func;
+};
+
+// platform layer, one implementation per host os
+size_t plat_page_size();
+void* plat_alloc(size_t size, bool executable);
+void plat_free(void* ptr, size_t size);
+bool plat_protect(void* ptr, size_t size, bool r, bool w, bool x);
+void plat_flush_icache(void* ptr, size_t size);
+std::string plat_join(const std::string& dir, const std::string& name);
+// null terminated
+const ShimEntry* plat_shims();
+
 void* lookup_shim(const char* name);
+
+// missing symbol stubs
 void* get_or_create_logging_stub(const char* name);
 int get_stub_hit_count();
 const std::vector<std::string>& get_missing_symbols();
+std::string strip_version_tag(const char* sym_name);
 
-// Global loader registry for dlopen/dlsym
+// global loader registry for dlopen and dlsym
 ElfSharedObject* find_loaded_library(const std::string& name);
 void register_loaded_library(ElfSharedObject* obj);
+const std::vector<ElfSharedObject*>& loaded_libraries();
 ElfSharedObject* load_library_cached(const std::string& lib_name, const std::string& dir);
 
 #endif
