@@ -1,6 +1,6 @@
-import getpass
 from pathlib import Path
 
+from iosc.account.anisette import is_valid_source
 from iosc.build import pipeline
 from iosc.cli.args import project_dir
 from iosc.codesign.identity import identity_from_files
@@ -13,13 +13,19 @@ from iosc.formats.pki import SigningIdentity
 
 def ask_password(apple_id: str):
     def prompt() -> str:
-        return getpass.getpass(f"Apple ID password for {apple_id}: ")
+        return input(f"Apple ID password for {apple_id}: ")
 
     return prompt
 
 
 def ask_code() -> str:
     return input("Two factor code: ")
+
+
+def checked_anisette(value: str | None) -> str | None:
+    if value is not None and not is_valid_source(value):
+        raise UsageError(f"--anisette takes local or an http(s) url, not {value!r}")
+    return value
 
 
 def from_files(args) -> tuple[SigningIdentity, Profile | Path | None]:
@@ -71,6 +77,7 @@ def resolve_material(
         device_name=device_name,
         team_id=args.team_id,
         revoke_and_reissue=args.revoke_and_reissue,
+        anisette_provider=checked_anisette(getattr(args, "anisette", None)),
     )
     return material.identity, material.profile, udid
 

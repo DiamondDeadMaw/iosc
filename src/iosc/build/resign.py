@@ -97,6 +97,8 @@ def resign_app(
     code_callback: Callable[[], str] | None = None,
     device_name: str | None = None,
     team_id: str | None = None,
+    refresh_profile: bool = False,
+    anisette_provider: str | None = None,
 ) -> ResignResult:
     source = Path(source).resolve()
     target = Path(output).resolve() if output is not None else default_output(source)
@@ -123,6 +125,8 @@ def resign_app(
             code_callback=code_callback,
             device_name=device_name,
             team_id=team_id,
+            refresh_profile=refresh_profile,
+            anisette_provider=anisette_provider,
         )
         signed = sign_app_recursive(
             app, identity=material.identity, profile=material.profile, udid=udid

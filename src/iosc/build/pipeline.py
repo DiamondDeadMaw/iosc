@@ -207,7 +207,8 @@ def signing_material(
     device_name: str | None = None,
     team_id: str | None = None,
     revoke_and_reissue: bool = False,
-    anisette_provider: str = "local",
+    anisette_provider: str | None = None,
+    refresh_profile: bool = False,
 ) -> SigningMaterial:
     state = str(paths.state_dir())
     account = session.login(
@@ -224,6 +225,7 @@ def signing_material(
         device_name=device_name,
         team_id=team_id,
         revoke_and_reissue=revoke_and_reissue,
+        refresh_profile=refresh_profile,
     )
     return SigningMaterial(
         identity=identity_from_bytes(issued.certificate, issued.private_key),

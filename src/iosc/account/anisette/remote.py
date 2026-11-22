@@ -1,9 +1,11 @@
 import base64
 from dataclasses import dataclass
 import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import ssl
 from typing import Any
@@ -11,8 +13,9 @@ import urllib.error
 import urllib.request
 import uuid
 
-from iosc.account.anisette.base import AnisetteHeaders, normalise
-from iosc.core import AnisetteError
+from iosc.account.anisette.base import AnisetteHeaders, client_time
+from iosc.account.anisette.websocket import WebSocket
+from iosc.core import AnisetteError, get_reporter, write_atomic
 from iosc.formats.plist import read_plist, write_plist
 
 DEFAULT_LOOKUP_URL = "https://gsa.apple.com/grandslam/GsService2/lookup"
@@ -29,7 +32,8 @@ HEADER_LOCALE = "X-Apple-Locale"
 HEADER_ROUTING_INFO = "X-Apple-I-MD-RINFO"
 
 DEFAULT_USER_AGENT = "akd/1.0 CFNetwork/1404.0.5 Darwin/22.3.0"
-DEFAULT_CLIENT_INFO = "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>"
+# gsa rejects com.apple.dt.Xcode (2026-09), "macOS;" with 503 (2026-11-20), old versions with -22410 (2026-11-21)
+DEFAULT_CLIENT_INFO = "<MacBookAir10,1> <Mac OS X;27.3;26C5035r> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
 DEFAULT_CONTENT_TYPE = "text/x-xml-plist"
 DEFAULT_SERIAL_NO = "0"
 DEFAULT_TIMEZONE = "UTC"
@@ -116,6 +120,12 @@ def build_provisioning_headers(
     }
 
 
+class HTTPStatusError(AnisetteError):
+    def __init__(self, status: int, message: str) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 def _ssl_context(verify_ssl: bool = False) -> ssl.SSLContext:
     if verify_ssl or os.environ.get("IOSC_VERIFY_SSL") == "1":
         return ssl.create_default_context()
@@ -140,7 +150,7 @@ def _http_request(
     except urllib.error.HTTPError as exc:
         content = exc.read()
         err_msg = content.decode(errors="replace")[:200]
-        raise AnisetteError(f"HTTP request failed with status {exc.code} ({err_msg})") from exc
+        raise HTTPStatusError(exc.code, f"HTTP request failed with status {exc.code} ({err_msg})") from exc
     except urllib.error.URLError as exc:
         raise AnisetteError(f"Could not reach {url}: {exc.reason}") from exc
 
@@ -162,10 +172,14 @@ def get_provisioning_urls(
     local_user_uuid: str | None = None,
     verify_ssl: bool = False,
     timeout: int = 15,
+    client_info: str = DEFAULT_CLIENT_INFO,
+    user_agent: str = DEFAULT_USER_AGENT,
 ) -> tuple[str, str]:
     dev_id = device_id or generate_device_id()
     lu_uuid = local_user_uuid or generate_local_user_uuid()
-    headers = build_provisioning_headers(device_id=dev_id, local_user_uuid=lu_uuid)
+    headers = build_provisioning_headers(
+        device_id=dev_id, local_user_uuid=lu_uuid, client_info=client_info, user_agent=user_agent
+    )
 
     content = _http_request(lookup_url, headers=headers, timeout=timeout, verify_ssl=verify_ssl)
     parsed = read_plist(content)
@@ -205,6 +219,8 @@ def start_provisioning(
             local_user_uuid=lu_uuid,
             verify_ssl=verify_ssl,
             timeout=timeout,
+            client_info=client_info,
+            user_agent=user_agent,
         )
         start_url = start_url or found_start
         finish_url = finish_url or found_finish
@@ -342,12 +358,218 @@ def end_provisioning(
     )
 
 
+V3_CLIENT_INFO_PATH = "/v3/client_info"
+V3_HEADERS_PATH = "/v3/get_headers"
+V3_PROVISIONING_PATH = "/v3/provisioning_session"
+# identities gsa rejects, see DEFAULT_CLIENT_INFO
+REJECTED_CLIENT_INFO = ("<macOS;", "dt.Xcode")
+
+
+@dataclass
+class V3State:
+    identifier: bytes
+    adi_pb: bytes | None = None
+
+    @classmethod
+    def fresh(cls) -> "V3State":
+        return cls(identifier=secrets.token_bytes(16))
+
+    @property
+    def local_user_uuid(self) -> str:
+        return hashlib.sha256(self.identifier).hexdigest().upper()
+
+    @property
+    def device_id(self) -> str:
+        return str(uuid.UUID(bytes=self.identifier)).upper()
+
+
+class StaleProvisioning(AnisetteError):
+    pass
+
+
+def server_state_dir(url: str) -> Path:
+    from iosc.config.paths import state_dir
+
+    slug = re.sub(r"[^A-Za-z0-9.-]+", "_", url.split("://", 1)[-1]).strip("_")
+    return state_dir() / "anisette" / slug
+
+
+def acceptable_client_info(info: str) -> bool:
+    return bool(info) and not any(marker in info for marker in REJECTED_CLIENT_INFO)
+
+
 class RemoteProvider:
-    def __init__(self, url: str, timeout: int = 20) -> None:
+    def __init__(
+        self,
+        url: str,
+        timeout: int = 20,
+        state_dir: Path | str | None = None,
+        client_info: str | None = None,
+        user_agent: str | None = None,
+        verify_ssl: bool = False,
+    ) -> None:
         if not url.startswith(("http://", "https://")):
             raise AnisetteError(f"{url!r} is not an http url")
         self.url = url
+        self.base = url.rstrip("/")
         self.timeout = timeout
+        self.verify_ssl = verify_ssl
+        self.state_path = Path(state_dir or server_state_dir(self.base)) / "state.json"
+        self.client_info = client_info
+        self.user_agent = user_agent
+        self._pinned_identity = client_info is not None
+        self.protocol: str | None = None
+
+    def detect(self) -> str:
+        if self.protocol is not None:
+            return self.protocol
+        try:
+            info = self._json(self.base + V3_CLIENT_INFO_PATH)
+        except HTTPStatusError as exc:
+            if exc.status != 404:
+                raise
+            info = {}
+        if not isinstance(info.get("client_info"), str):
+            get_reporter().warn(f"{self.base} has no v3 api, using its shared v1 identity")
+            self.protocol = "v1"
+            return self.protocol
+
+        if not self._pinned_identity:
+            served = info["client_info"]
+            if acceptable_client_info(served):
+                self.client_info = served
+                self.user_agent = self.user_agent or str(info.get("user_agent") or DEFAULT_USER_AGENT)
+            else:
+                get_reporter().warn(f"{self.base} serves a client identity gsa rejects, using the default")
+        self.client_info = self.client_info or DEFAULT_CLIENT_INFO
+        self.user_agent = self.user_agent or DEFAULT_USER_AGENT
+        self.protocol = "v3"
+        return self.protocol
+
+    def _json(self, url: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        headers = {"Accept": "application/json"}
+        data = None
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body).encode("utf-8")
+        content = _http_request(url, headers, body=data, timeout=self.timeout, verify_ssl=self.verify_ssl)
+        try:
+            payload = json.loads(content)
+        except ValueError as exc:
+            raise AnisetteError(f"{url} did not answer with json") from exc
+        if not isinstance(payload, dict):
+            raise AnisetteError(f"{url} answered with {type(payload).__name__}, expected an object")
+        return payload
+
+    def load_state(self) -> V3State | None:
+        if not self.state_path.is_file():
+            return None
+        try:
+            saved = json.loads(self.state_path.read_text(encoding="utf-8"))
+            identifier = base64.b64decode(saved["identifier"])
+            adi_pb = base64.b64decode(saved["adi_pb"]) if saved.get("adi_pb") else None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if len(identifier) != 16 or adi_pb is None:
+            return None
+        return V3State(identifier=identifier, adi_pb=adi_pb)
+
+    def save_state(self, state: V3State) -> None:
+        data = {
+            "server": self.base,
+            "identifier": base64.b64encode(state.identifier).decode("ascii"),
+            "adi_pb": base64.b64encode(state.adi_pb or b"").decode("ascii"),
+        }
+        write_atomic(self.state_path, (json.dumps(data, indent=2) + "\n").encode("utf-8"))
+
+    def reset(self) -> None:
+        self.state_path.unlink(missing_ok=True)
+
+    def open_session(self) -> WebSocket:
+        ws_url = re.sub(r"^http", "ws", self.base) + V3_PROVISIONING_PATH
+        return WebSocket.connect(ws_url, timeout=self.timeout, context=_ssl_context(self.verify_ssl))
+
+    def provision(self) -> V3State:
+        self.detect()
+        state = V3State.fresh()
+        identity = {
+            "device_id": state.device_id,
+            "local_user_uuid": state.local_user_uuid,
+            "client_info": self.client_info,
+            "user_agent": self.user_agent,
+            "verify_ssl": self.verify_ssl,
+            "timeout": self.timeout,
+        }
+        session: ProvisioningSession | None = None
+        ws = self.open_session()
+        try:
+            while True:
+                message = ws.recv_json()
+                result = message.get("result")
+                if result == "GiveIdentifier":
+                    ws.send_json({"identifier": base64.b64encode(state.identifier).decode("ascii")})
+                elif result == "GiveStartProvisioningData":
+                    spim, session = start_provisioning(**identity)
+                    ws.send_json({"spim": base64.b64encode(spim).decode("ascii")})
+                elif result == "GiveEndProvisioningData":
+                    if session is None:
+                        raise AnisetteError("anisette server asked to finish before starting")
+                    done = end_provisioning(session, cpim=str(message.get("cpim", "")), timeout=self.timeout)
+                    ws.send_json(
+                        {
+                            "ptm": base64.b64encode(done.ptm).decode("ascii"),
+                            "tk": base64.b64encode(done.tk).decode("ascii"),
+                        }
+                    )
+                elif result == "ProvisioningSuccess":
+                    state.adi_pb = base64.b64decode(message["adi_pb"])
+                    break
+                else:
+                    detail = message.get("message", "")
+                    raise AnisetteError(f"anisette server provisioning failed: {result} {detail}".strip())
+        finally:
+            ws.close()
+
+        self.save_state(state)
+        get_reporter().detail(f"provisioned machine {state.device_id} with {self.base}")
+        return state
+
+    def machine_headers(self, state: V3State) -> dict[str, str]:
+        answer = self._json(
+            self.base + V3_HEADERS_PATH,
+            body={
+                "identifier": base64.b64encode(state.identifier).decode("ascii"),
+                "adi_pb": base64.b64encode(state.adi_pb or b"").decode("ascii"),
+            },
+        )
+        result = answer.get("result")
+        if result == "GetHeadersError":
+            raise StaleProvisioning(f"anisette server rejected the machine: {answer.get('message', '')}")
+        if result != "Headers":
+            raise AnisetteError(f"anisette server answered get_headers with {result!r}")
+        absent = [k for k in ("X-Apple-I-MD", "X-Apple-I-MD-M", "X-Apple-I-MD-RINFO") if not answer.get(k)]
+        if absent:
+            raise AnisetteError("anisette server did not supply " + ", ".join(absent))
+        return {k: str(answer[k]) for k in ("X-Apple-I-MD", "X-Apple-I-MD-M", "X-Apple-I-MD-RINFO")}
+
+    def fetch_v3(self) -> dict[str, str]:
+        state = self.load_state() or self.provision()
+        try:
+            machine = self.machine_headers(state)
+        except StaleProvisioning as exc:
+            get_reporter().warn(f"{exc}, provisioning again")
+            state = self.provision()
+            machine = self.machine_headers(state)
+        return {
+            **machine,
+            "X-Apple-I-MD-LU": state.local_user_uuid,
+            "X-Mme-Device-Id": state.device_id,
+            "X-Mme-Client-Info": str(self.client_info),
+            "X-Apple-I-Client-Time": client_time(),
+            "X-Apple-I-TimeZone": DEFAULT_TIMEZONE,
+            "X-Apple-Locale": DEFAULT_LOCALE,
+            "X-Apple-I-SRL-NO": DEFAULT_SERIAL_NO,
+        }
 
     def fetch(self) -> dict[str, Any]:
         req = urllib.request.Request(self.url, headers={"Accept": "application/json"})
@@ -368,4 +590,6 @@ class RemoteProvider:
         return payload
 
     def headers(self) -> AnisetteHeaders:
+        if self.detect() == "v3":
+            return AnisetteHeaders.from_dict(self.fetch_v3())
         return AnisetteHeaders.from_dict(self.fetch())

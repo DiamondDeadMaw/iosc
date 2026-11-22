@@ -1,7 +1,7 @@
 from iosc.build import resign_app
 from iosc.cli.args import device_from_args
 from iosc.cli.commands.install import report_progress
-from iosc.cli.commands.sign import ask_code, ask_password, resolve_udid
+from iosc.cli.commands.sign import ask_code, ask_password, checked_anisette, resolve_udid
 from iosc.core import logging
 
 
@@ -18,6 +18,8 @@ def run(args) -> None:
         password_callback=ask_password(args.apple_id),
         code_callback=ask_code,
         team_id=args.team_id,
+        refresh_profile=args.refresh_profile,
+        anisette_provider=checked_anisette(getattr(args, "anisette", None)),
     )
     for warning in result.warnings:
         logging.warn(warning)

@@ -3,6 +3,7 @@ import datetime
 import json
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from iosc.core import AnisetteError
 
@@ -196,6 +197,42 @@ def warnings() -> list[str]:
         "Apps signed with a free Apple ID stop launching after about a week "
         "and must be re-signed and reinstalled.",
     ]
+
+
+DEFAULT_ANISETTE_SERVER = "https://mac-ani.jkcoxson.com"
+LOCAL_SOURCE = "local"
+
+
+def normalise_source(source: str) -> str:
+    value = str(source).strip()
+    if value.lower() == LOCAL_SOURCE:
+        return LOCAL_SOURCE
+    return value.rstrip("/")
+
+
+def is_valid_source(source: str) -> bool:
+    value = normalise_source(source)
+    if value == LOCAL_SOURCE:
+        return True
+    parts = urlsplit(value)
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
+
+
+# precedence is flag, then settings, then the default server
+def source_origin(explicit: str | None = None, configured: str | None = None, *, load: bool = True) -> tuple[str, str]:
+    if explicit and str(explicit).strip():
+        return normalise_source(explicit), "flag"
+    if configured is None and load:
+        from iosc.config.settings import load as load_settings
+
+        configured = load_settings().anisette_provider
+    if configured and str(configured).strip():
+        return normalise_source(configured), "settings"
+    return DEFAULT_ANISETTE_SERVER, "default"
+
+
+def resolve_source(explicit: str | None = None, configured: str | None = None, *, load: bool = True) -> str:
+    return source_origin(explicit, configured, load=load)[0]
 
 
 def get_provider(source: str | None = None, **kwargs: Any) -> AnisetteProvider:

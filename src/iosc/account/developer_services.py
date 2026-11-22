@@ -453,11 +453,12 @@ class DeveloperSession:
         team_id: str | None = None,
         application_name: str | None = None,
         revoke_and_reissue: bool = False,
+        refresh_profile: bool = False,
     ) -> tuple[IssuedCertificate, ProvisioningProfile]:
         team = self.team(team_id)
         identity, _ = self.obtain_certificate(team, key, revoke_and_reissue=revoke_and_reissue)
 
-        cached_profile_rec = cache.get_profile(bundle_id, udid, root_dir=self.cache_dir)
+        cached_profile_rec = None if refresh_profile else cache.get_profile(bundle_id, udid, root_dir=self.cache_dir)
         sidecar_expiry = cache.get_profile_expiry(bundle_id, udid, root_dir=self.cache_dir)
         if cached_profile_rec is not None and cache.is_profile_valid(cached_profile_rec, sidecar_expiry):
             cached_parsed = Profile.from_bytes(cached_profile_rec.data)

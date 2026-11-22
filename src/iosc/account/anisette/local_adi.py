@@ -174,7 +174,11 @@ class LocalADIProvider:
         self.local_user_uuid = local_user_uuid or saved.get("local_user_uuid") or gen_lu_uuid
         self.identifier = identifier or saved.get("identifier") or gen_ident
         self.routing_info = routing_info or saved.get("routing_info") or "17106176"
-        self.client_info = client_info or saved.get("client_info") or DEFAULT_CLIENT_INFO
+        info = client_info or saved.get("client_info") or DEFAULT_CLIENT_INFO
+        # identities gsa now rejects, see DEFAULT_CLIENT_INFO
+        if "<macOS;" in info or "dt.Xcode" in info or "<Mac OS X;13.1;" in info:
+            info = DEFAULT_CLIENT_INFO
+        self.client_info = info
         self._save_identity()
 
         self.vendor_dir = Path(vendor_dir) if vendor_dir is not None else adi_lib_dir().path

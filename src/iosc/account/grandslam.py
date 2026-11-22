@@ -18,6 +18,7 @@ from iosc.account.anisette.base import (
     AnisetteProvider,
     client_provided_data,
     get_provider,
+    resolve_source,
 )
 from iosc.account.srp import AppleSrpSession, PROTOCOLS
 from iosc.config import cache, load_settings
@@ -151,7 +152,7 @@ class Client:
     ) -> None:
         if provider is None:
             settings = load_settings()
-            self.provider = get_provider(settings.anisette_provider)
+            self.provider = get_provider(resolve_source(configured=settings.anisette_provider, load=False))
         else:
             self.provider = provider
         self.application = application

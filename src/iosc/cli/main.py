@@ -42,9 +42,14 @@ def add_signing_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--udid", default=None)
     parser.add_argument("--apple-id", dest="apple_id", default=None)
     parser.add_argument("--team-id", dest="team_id", default=None)
+    add_anisette_argument(parser)
     parser.add_argument(
         "--revoke-and-reissue", dest="revoke_and_reissue", action="store_true"
     )
+
+
+def add_anisette_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--anisette", default=None, metavar="local|URL")
     parser.add_argument("--force", action="store_true")
 
 
@@ -142,12 +147,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     auth_login = auth_subparsers.add_parser("login", parents=[common])
     auth_login.add_argument("apple_id")
-    auth_login.add_argument("--anisette", default="local")
+    add_anisette_argument(auth_login)
     auth_login.set_defaults(handler=auth_cmd.run)
 
     auth_status = auth_subparsers.add_parser("status", parents=[common])
-    auth_status.add_argument("apple_id")
+    auth_status.add_argument("apple_id", nargs="?", default=None)
+    add_anisette_argument(auth_status)
     auth_status.set_defaults(handler=auth_cmd.run)
+
+    auth_set_anisette = auth_subparsers.add_parser("set-anisette", parents=[common])
+    auth_set_anisette.add_argument("source", metavar="local|URL|default")
+    auth_set_anisette.set_defaults(handler=auth_cmd.run)
 
     auth_apk_extract = auth_subparsers.add_parser("apk-extract", parents=[common])
     auth_apk_extract.add_argument("apkm", nargs="?", default=None)
@@ -216,6 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
     resign_parser.add_argument("--udid", default=None)
     resign_parser.add_argument("--install", action="store_true")
     resign_parser.add_argument("--wifi", action="store_true")
+    resign_parser.add_argument("--refresh-profile", dest="refresh_profile", action="store_true")
+    add_anisette_argument(resign_parser)
     resign_parser.set_defaults(handler=resign_cmd.run)
 
     wifi_parser = subparsers.add_parser("wifi", parents=[common])

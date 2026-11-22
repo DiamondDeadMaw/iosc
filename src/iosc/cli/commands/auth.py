@@ -1,16 +1,23 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from iosc.account import session
-from iosc.account.anisette import extract_adi_libraries
-from iosc.cli.commands.sign import ask_code, ask_password
-from iosc.config import paths
+from iosc.account.anisette import (
+    DEFAULT_ANISETTE_SERVER,
+    extract_adi_libraries,
+    is_valid_source,
+    normalise_source,
+    source_origin,
+)
+from iosc.cli.commands.sign import ask_code, ask_password, checked_anisette
+from iosc.config import load_settings, paths, save_settings
 from iosc.core import logging
+from iosc.core.errors import UsageError
 
 
 def run_login(args) -> None:
     account = session.login(
         args.apple_id,
-        provider_name=args.anisette,
+        provider_name=checked_anisette(args.anisette),
         cache_dir=str(paths.state_dir()),
         password_callback=ask_password(args.apple_id),
         code_callback=ask_code,
@@ -22,15 +29,37 @@ def run_login(args) -> None:
 
 
 def run_status(args) -> None:
-    state = session.status(args.apple_id, cache_dir=str(paths.state_dir()))
+    source, origin = source_origin(checked_anisette(args.anisette))
+    state = session.status(args.apple_id, cache_dir=str(paths.state_dir())) if args.apple_id else None
     if args.json:
-        logging.result(asdict(state))
+        payload = {"anisette": source, "anisette_origin": origin}
+        if state is not None:
+            payload.update(asdict(state))
+        logging.result(payload)
+        return
+    logging.info(f"anisette source {source} ({origin})")
+    if state is None:
         return
     if not state.logged_in:
         logging.info(f"not signed in as {args.apple_id}, run 'iosc auth login'")
         return
     trusted = "trusted device saved" if state.identity_token_valid else "two factor needed next time"
     logging.success(f"signed in as {args.apple_id}, {trusted}")
+
+
+def run_set_anisette(args) -> None:
+    value = args.source.strip()
+    if value.lower() == "default":
+        stored = None
+    elif is_valid_source(value):
+        stored = normalise_source(value)
+    else:
+        raise UsageError(f"set-anisette takes local, an http(s) url or default, not {value!r}")
+    save_settings(replace(load_settings(), anisette_provider=stored))
+    if args.json:
+        logging.result({"anisette": stored or DEFAULT_ANISETTE_SERVER, "stored": stored})
+        return
+    logging.success(f"anisette source set to {stored or DEFAULT_ANISETTE_SERVER + ' (default)'}")
 
 
 def run_apk_extract(args) -> None:
@@ -44,7 +73,12 @@ def run_apk_extract(args) -> None:
     logging.success(f"extracted {len(extracted)} ADI libraries to {extracted[0].parent}")
 
 
-HANDLERS = {"login": run_login, "status": run_status, "apk-extract": run_apk_extract}
+HANDLERS = {
+    "login": run_login,
+    "status": run_status,
+    "set-anisette": run_set_anisette,
+    "apk-extract": run_apk_extract,
+}
 
 
 def run(args) -> None:

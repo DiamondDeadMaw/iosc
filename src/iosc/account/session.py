@@ -1,5 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ from iosc.account.grandslam import (
     TwoFactorRequired,
 )
 from iosc.config import cache
-from iosc.core import logging
+from iosc.core import logging, write_atomic
 from iosc.core.errors import AuthError
 
 
@@ -25,10 +26,46 @@ class SessionStatus:
     identity_token_expiry: int | None = None
 
 
+SOURCE_RECORD = "anisette_source.json"
+
+
+def swap_source(source: str, cache_dir: str | Path | None = None) -> str | None:
+    path = cache.get_cache_dir(cache_dir) / SOURCE_RECORD
+    previous = None
+    if path.is_file():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8")).get("source")
+        except (OSError, ValueError, AttributeError):
+            previous = None
+    if previous != source:
+        write_atomic(path, (json.dumps({"source": source}) + "\n").encode("utf-8"))
+    return previous
+
+
+# machine state and trusted device tokens belong to the source that minted them
+def prepare_provider(
+    source: str, provider: Any, cache_dir: str | Path | None = None
+) -> bool:
+    previous = swap_source(source, cache_dir)
+    if previous is None or previous == source:
+        return False
+    logging.get_reporter().info(
+        f"anisette source changed from {previous} to {source}, provisioning a fresh machine"
+    )
+    reset = getattr(provider, "reset", None)
+    if callable(reset):
+        reset()
+    return True
+
+
+def tokens_match_source(tokens: dict[str, Any] | None, source: str) -> bool:
+    return bool(tokens) and tokens.get("anisette_source", anisette.LOCAL_SOURCE) == source
+
+
 def login(
     apple_id: str,
     password: str | None = None,
-    provider_name: str = "local",
+    provider_name: str | None = None,
     cache_dir: str | Path | None = None,
     no_cache: bool = False,
     code_callback: Callable[[], str] | None = None,
@@ -37,16 +74,21 @@ def login(
 ) -> Account:
     reporter = logging.get_reporter()
     kwargs = dict(provider_kwargs or {})
+    source = anisette.resolve_source(provider_name)
 
     try:
-        provider = anisette.get_provider(provider_name, **kwargs)
+        provider = anisette.get_provider(source, **kwargs)
     except Exception as exc:
-        raise AuthError(f"Could not set up {provider_name} anisette provider: {exc}") from exc
+        raise AuthError(f"Could not set up {source} anisette provider: {exc}") from exc
 
-    reporter.detail("Fetching anisette headers")
+    prepare_provider(source, provider, cache_dir)
+    reporter.detail(f"Fetching anisette headers from {source}")
     client = Client(provider=provider)
 
     cached_tokens = cache.get_auth_tokens(apple_id, root_dir=cache_dir) if not no_cache else None
+    if cached_tokens and not tokens_match_source(cached_tokens, source):
+        reporter.detail("Cached tokens came from another anisette source, signing in again")
+        cached_tokens = None
     if cached_tokens and cache.is_app_token_valid(cached_tokens):
         reporter.info(f"Using cached GrandSlam app token for {apple_id}")
         # replayed token still needs fresh device headers every request
@@ -92,6 +134,7 @@ def login(
             "app_token": account.token,
             "adsid": account.adsid,
             "identity_token": account.identity_token or identity_token,
+            "anisette_source": source,
         }
         if account.app_token_expiry is not None:
             payload["app_token_expiry"] = account.app_token_expiry
